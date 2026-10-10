@@ -2,6 +2,8 @@
 
 > **本文件性质**：练习1 的独立草稿，仅供本人负责的「练习1」使用，**不是**正式报告。
 > 正式报告 `report/report.md` 的「四、实验内容与实现 → 练习」小节可从本文件整理。
+> 本文件**只保留技术内容**（题目分析、代码解释、实验过程、调试验证、截图、技术总结）。
+> AI Prompt、提示词迭代、AI 协作过程与人工纠错记录已分离到 `report/prompt-member1.md`。
 > 本文件**不包含**其他组员的练习内容；未修改 `report/report.md` 与 `report/prompt.md`。
 
 ---
@@ -125,7 +127,7 @@ $ riscv64-unknown-elf-objdump -d -M no-aliases --disassemble=kern_entry bin/kern
 
 ![单步跳转到 kern_init](./images/exercise1_gdb_jump.png)
 
-> 三张图中 `0x80203000` 均被 GDB 标注为 `<SBI_CONSOLE_PUTCHAR>`，原因见 §2.3 第 6 条（`bootstacktop` 是 `.data` 末端的零长度标签，与 `.sdata` 首部的 `SBI_CONSOLE_PUTCHAR` 同址）。
+> 三张图中 `0x80203000` 均被 GDB 标注为 `<SBI_CONSOLE_PUTCHAR>`，原因是 `bootstacktop` 是 `.data` 末端的**零长度标签**，与 `.sdata` 首部的 `SBI_CONSOLE_PUTCHAR` 同址（该同址问题的发现与纠正记录见 `report/prompt-member1.md`）。
 
 #### 1.7 小结
 
@@ -133,56 +135,15 @@ $ riscv64-unknown-elf-objdump -d -M no-aliases --disassemble=kern_entry bin/kern
 
 ---
 
-## 二、练习1 的 AI 使用过程（单独整理）
-
-### 2.1 实际使用的 Prompt（本次会话原文摘录，非编造）
-
-> 说明：以下 Prompt 均为本次协作中**实际发出**的原文摘录。本文件不写入任何 API Key 或凭据。
-
-1. **初始分析**
-   > 「我正在完成操作系统课程 Lab1，负责练习1。请作为我的实验辅助 Agent，先阅读代码、分析原理，不要直接修改文件。请阅读 `code/kern/init/entry.S`、`init.c`、`tools/kernel.ld`……逐行解释 `kern_entry`、`la sp, bootstacktop`、`tail kern_init`；查找 `bootstack`/`bootstacktop`/`KSTACKSIZE` 的定义；……给出源码路径和行号，并指出哪些结论还需要通过运行或调试验证。」
-
-2. **提供真实题目**：粘贴课程指导文档中 Lab1 正文与练习原文（练习1「理解内核启动中的程序入口操作」、练习2「使用 GDB 验证启动流程」）。
-
-3. **要求实测验证**
-   > 「……现在需要对关键结论进行实际验证。请在当前项目中：检查 `code/Makefile` 确认工具链、构建命令和内核产物路径；核对 `entry.S`/`init.c`/`kernel.ld` 与相关头文件的行号、宏定义；在环境具备时执行项目规定的构建命令；使用 `readelf`、`nm`、`objdump` 验证内核入口地址、`bootstack`/`bootstacktop` 的实际地址及差值、`la`/`tail` 的反汇编；按项目规定方法运行 QEMU……**特别注意：`call` 写入返回地址寄存器 `ra`，不代表自动写入栈。请纠正之前不准确的表述。**」
-
-4. **反向审查**
-   > 「你现在不再扮演普通的代码解释助手，而是操作系统实验的技术审查员……对之前的所有结论进行一次严格的反向审查，标注证据等级（A/B/C/D）……不要为了完成审查而强行制造问题。」
-
-5. **针对性复核**
-   > 「……严格区分汇编伪指令与汇编指示符；核对 `jal` 与 `c.j` 的跳转范围、对齐条件和本例实际偏移；分析 `bootstacktop` 与 `SBI_CONSOLE_PUTCHAR` 同址的成因与覆盖风险……」
-
-> **缺失说明**：除以上外，若最终报告需要引用更早/更细的历史 Prompt，应按实际记录补全；本文件不补造未发生的指令。
-
-### 2.2 主要分析与验证步骤
+## 二、实验过程与验证步骤
 
 1. 阅读 `entry.S`、`init.c`、`kernel.ld`，核对行号与宏定义（`PGSIZE`/`PGSHIFT`/`KSTACKPAGE`/`KSTACKSIZE`）。
 2. `make` 构建，产出 `bin/kernel`（ELF）与 `bin/ucore.img`。
 3. `readelf -h` 取入口地址；`nm` 取 `kern_entry`/`kern_init`/`bootstack`/`bootstacktop` 的实际地址与差值。
 4. `objdump -d` 与 `objdump -d -M no-aliases` 对照 `kern_entry` 的最终机器码；再反汇编未链接的 `entry.o` 与 `readelf -r` 重定位，解释「汇编定型、链接填数/松弛」。
 5. `readelf -A` 确认栈 16 字节对齐属性。
-6. 运行 QEMU：先用项目命令（`make qemu`，当时仍为 `-device loader` 加载方式），再用 `-kernel` 对照，并用 GDB 断点定位控制流去向。这一步的**对照实验**后来成为定位启动问题的关键（见第三节）。
+6. 运行 QEMU：先用项目命令（`make qemu`，当时仍为 `-device loader` 加载方式），再用 `-kernel` 对照，并用 GDB 断点定位控制流去向。这一步的**对照实验**后来成为定位启动问题的关键（见 §三）。
 7. 结束后 `make clean`，保持仓库干净。
-
-### 2.3 AI 初始回答存在的问题（人工发现 / 实测推翻）
-
-| # | 初始回答的问题 | 纠正依据 |
-|---|---|---|
-| 1 | 称 `call` 会把返回地址写入栈 | 返回地址写的是 `ra` 寄存器；落栈由被调函数序言决定（`kern_init` 序言 `sd ra,8(sp)`） |
-| 2 | 笼统称 `tail` 展开为 `auipc+jalr`，后又只称其为 `j` | 真实两阶段：`entry.o` 中为 `auipc t1 + jalr x0`（8 字节），链接后松弛为 2 字节 `c.j` |
-| 3 | 把 `la`/`tail`/`.global`/`.space`/`.align` 统称「汇编伪指令」 | 前两者是伪指令（展开为指令），后四者是汇编指示符（不产生指令） |
-| 4 | **（早期假设）** 曾把 `make qemu` 失败倾向归因于 QEMU 版本差异 | 当时因无证据即未写入结论；**后经启动参数对照实验纠正**，定位为 `-device loader` 未能正确提供下一阶段入口（见 §3.2），与 QEMU 版本无关 |
-| 5 | 曾把 `noreturn` 当作「不会返回的证明」 | 它是给编译器的承诺而非运行期保证；`while(1)` 才是依据 |
-| 6 | 曾把 `bootstacktop` 与全局对象 `SBI_CONSOLE_PUTCHAR` 同址仅当「巧合」 | 前者是 `.data` 末端**零长度标签**(size 0)，后者是 `.sdata` 首部 **8 字节对象**(size 8)；当前无覆盖风险 |
-| 7 | 曾先行写入正式报告草稿 | 按人工要求已 `git restore` 撤回（本文件为独立草稿，不再改动正式文件） |
-
-### 2.4 如何通过实验纠正
-
-- 对第 1、2 条：以 `objdump -d -M no-aliases`、`objdump`/`readelf -r` 反汇编 `entry.o` 为准绳，逐条比对机器码，确认 `tail` 的目标寄存器是 `x0`、`c.j` 由链接器松弛得到。
-- 对第 3 条：以「是否出现在反汇编指令流中」为判据区分伪指令与指示符；用 `readelf -s` 验证 `.globl` 使符号绑定为 GLOBAL，用 `.data` 节大小/内容验证 `.space` 写出 0 字节。
-- 对第 4 条：先把未证实的归因从结论中删除、只保留可复现的实测现象；后经 `-device loader` / `-kernel` 对照实验定位到真正原因（启动参数），并在 Makefile 中修复（见第三节）。
-- 对第 6 条：用 `readelf -s` 的 size 字段与节表地址直接判定「标签 vs 对象」。
 
 ---
 
@@ -250,4 +211,4 @@ $ riscv64-unknown-elf-objdump -d -M no-aliases --disassemble=kern_entry bin/kern
 
 ---
 
-*本文件为草稿，待人工审核后再决定是否并入正式报告。*
+*本文件为草稿，待人工审核后再决定是否并入正式报告。AI 协作记录见 `report/prompt-member1.md`。*
