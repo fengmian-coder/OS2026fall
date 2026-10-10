@@ -123,9 +123,23 @@ Makefile 中 make qemu 最终使用 QEMU virt 机器，并通过：
 
 加载 QEMU 自带的 OpenSBI。
 
-内核镜像通过 loader 被放置到：
+在本实验中，内核镜像并不是由 OpenSBI 从磁盘读取并加载的。
+Makefile 使用 QEMU 参数：
 
-0x80200000
+-device loader,file=$(UCOREIMG),addr=0x80200000
+
+由 QEMU loader 在启动时直接将 ucore.img 放入物理地址
+0x80200000。
+
+OpenSBI 的主要作用是完成 M 模式下的基础硬件和运行环境初始化，
+并在初始化完成后把下一阶段执行地址设置为 0x80200000，
+切换到 S-mode 后将执行控制权交给 uCore。
+
+因此需要区分：
+
+QEMU loader：负责把 ucore.img 放到 0x80200000；
+
+OpenSBI：负责基础初始化，并最终把执行控制权交给 0x80200000。
 
 实际运行 make qemu 后，OpenSBI 输出中可以观察到：
 
@@ -190,19 +204,3 @@ Domain0 Next Mode = S-mode
 
 说明 Lab1 最小内核启动流程可以正常运行。
 
-执行：
-
-make grade
-
-时，目前仓库中的 Makefile 会尝试执行：
-
-tools/grade.sh
-
-但当前 lab1 分支、个人分支以及已检查的其他现有分支中
-均不存在该文件，因此出现：
-
-cannot open tools/grade.sh: No such file
-
-该现象属于当前实验仓库测试脚本缺失，不能据此判断内核
-代码测试失败。后续若课程方补充正式 grade.sh，再重新执行
-make grade 并补充测试结果。
