@@ -117,57 +117,77 @@ kern_init 首先使用链接脚本提供的 edata 和 end 符号
 
 ## 5. OpenSBI 与 QEMU 启动过程
 
-Makefile 中 make qemu 最终使用 QEMU virt 机器，并通过：
-
--bios default
-
-加载 QEMU 自带的 OpenSBI。
-
-在本实验中，内核镜像并不是由 OpenSBI 从磁盘读取并加载的。
-Makefile 使用 QEMU 参数：
+老师提供的原始 Lab1 Makefile 使用 QEMU 的 loader 参数：
 
 -device loader,file=$(UCOREIMG),addr=0x80200000
 
-由 QEMU loader 在启动时直接将 ucore.img 放入物理地址
-0x80200000。
+其设计意图是直接将 ucore.img 放入物理地址 0x80200000。
+课堂中也对这种简化的加载方式进行了说明，即本实验没有真正让
+OpenSBI 从外部存储设备读取内核，而是借助 QEMU 完成镜像加载。
 
-OpenSBI 的主要作用是完成 M 模式下的基础硬件和运行环境初始化，
-并在初始化完成后把下一阶段执行地址设置为 0x80200000，
-切换到 S-mode 后将执行控制权交给 uCore。
+在本组实际实验过程中，成员1通过 QEMU 和 GDB 对照调试发现，
+在当前实验环境中使用上述 -device loader 参数时，OpenSBI
+没有正确进入 0x80200000 的内核入口。
 
-因此需要区分：
+经过对照验证后，将 qemu 和 debug 的启动参数修改为：
 
-QEMU loader：负责把 ucore.img 放到 0x80200000；
+-kernel $(UCOREIMG)
 
-OpenSBI：负责基础初始化，并最终把执行控制权交给 0x80200000。
+修改后 OpenSBI 输出：
 
-实际运行 make qemu 后，OpenSBI 输出中可以观察到：
+Domain0 Next Address : 0x80200000
+Domain0 Next Mode    : S-mode
 
-Firmware Base = 0x80000000
-
-Domain0 Next Address = 0x80200000
-
-Domain0 Next Mode = S-mode
-
-说明 OpenSBI 自身运行在固件阶段，并在初始化结束后准备
-将执行环境切换到 S 模式，同时把下一阶段入口设置为
-0x80200000。
-
-之后终端成功输出：
+并且随后成功输出：
 
 (THU.CST) os is loading ...
 
-说明 CPU 已经成功进入 uCore 内核并执行到 kern_init。
+因此最终仓库中采用 -kernel $(UCOREIMG) 启动内核。
 
-因此本实验中的主要启动链可以总结为：
+需要注意 QEMU 与 OpenSBI 的职责不同：
 
-QEMU 启动
-→ OpenSBI
-→ 0x80200000
-→ kern_entry
-→ 设置内核栈
-→ kern_init
-→ cprintf 输出。
+- QEMU 用于模拟 RISC-V 硬件，并负责准备内核镜像；
+- OpenSBI 运行在 M 模式，完成必要的底层初始化，并为 S 模式
+  操作系统提供 SBI 服务；
+- OpenSBI 初始化完成后，将执行控制权交给下一阶段的
+  0x80200000，随后开始执行 uCore 的 kern_entry。
+
+从实际运行结果可以观察到：
+
+Firmware Base        : 0x80000000
+Domain0 Next Address : 0x80200000
+Domain0 Next Mode    : S-mode
+
+其中：
+
+- Firmware Base = 0x80000000 表明 OpenSBI 固件所在区域；
+- Next Address = 0x80200000 表明 OpenSBI 下一阶段将进入 uCore；
+- Next Mode = S-mode 表明内核将在 Supervisor Mode 下运行。
+
+因此，本实验中的启动关系可以概括为：
+
+QEMU 启动 RISC-V virt 虚拟机
+        ↓
+准备内核镜像
+        ↓
+OpenSBI 在 M-mode 下完成基础初始化
+        ↓
+Next Address = 0x80200000
+        ↓
+切换到 S-mode
+        ↓
+执行 uCore 的 kern_entry
+        ↓
+设置内核栈
+        ↓
+进入 kern_init
+        ↓
+输出 "(THU.CST) os is loading ..."
+
+这一过程说明，QEMU、OpenSBI 和 uCore 分别承担不同层次的工作：
+QEMU 提供模拟硬件环境并准备内核镜像，OpenSBI 负责底层初始化和
+特权级切换，而 uCore 从 0x80200000 开始执行自己的内核代码。
+
 
 ## 6. ELF 与 BIN 的区别
 
