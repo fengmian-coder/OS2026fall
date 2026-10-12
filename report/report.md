@@ -624,19 +624,18 @@ Lab 1 主要关注“内核如何开始运行”，还没有真正进入完整�
 
 ## 附：AI Prompt 与协作记录说明
 
-三名成员均将各自实际使用的 AI Prompt 与协作过程单独整理并保存在仓库中：
+本实验三名成员在实验过程中分别记录了各自实际使用的 AI Prompt、
+AI 辅助内容以及后续验证和修正过程。
 
-```text
-report/prompt-member1.md
-report/prompt-member2.md
-report/prompt-member3.md
-```
+实验完成后，三名成员的 Prompt 记录已经统一汇总到：
 
-其中，张馨月的 Prompt 记录保存在 `report/prompt-member1.md`，主要涵盖练习1的原理分析、反汇编与 GDB 验证、启动问题定位，以及对 AI 初始回答的复核和纠正过程。
+`report/prompt.md`
 
-贾璐菡的 Prompt 记录保存在 `report/prompt-member2.md`，主要涵盖实验任务规划、WSL/GitHub 环境与认证问题排查、QEMU/GDB 启动跟踪、截图整理、实验报告撰写和 Git 协作提交过程。
+其中包括：
 
-李文慧的 Prompt 记录保存在 `report/prompt-member3.md`，采用 `\[PROMPT]`、`\[RELY]`、`\[GUARANTEE]`、`\[SPECIFICATION]` 四部分结构约束 AI 的分析范围，并结合实际编译、QEMU 运行和仓库最终状态对整体构建与启动流程进行验证和修正。
+- 张馨月：练习1原理分析、反汇编与 GDB 验证、启动问题定位以及 AI 回答复核；
+- 贾璐菡：练习2启动流程跟踪、WSL/GitHub 环境排查、QEMU/GDB 调试和 Git 协作；
+- 李文慧：Makefile、kernel.ld、ELF/BIN、QEMU/OpenSBI/uCore 整体流程分析与最终报告整合。
 
-三份 Prompt 记录均以各成员实际实验过程为依据，用于说明 AI 在实验中的辅助作用；最终技术结论仍以源码、编译结果、QEMU 输出和 GDB 调试结果为准。
-
+实验中的 AI 输出并未直接作为最终结论，而是结合真实源码、编译结果、
+QEMU 输出和 GDB 调试结果进行了验证和修正。
