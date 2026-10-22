@@ -1,16 +1,22 @@
+
 # Lab2：GDB 调试与 Sv39 地址转换机制分析
 
 ## 1. 实验目的
 
 本部分实验使用 QEMU 和 GDB 调试 RISC-V 内核启动过程，重点观察 `satp` 寄存器的变化，理解 Sv39 分页机制、页表地址转换过程以及 TLB 的作用。
 
+此外，结合 QEMU 提供的 MMU 调试日志，观察模拟器的 TLB 填充与地址转换过程，将实际运行日志与 GDB 调试结果进行对照验证。
+
 ## 2. 实验环境
 
-- 操作系统：Ubuntu（WSL2）
+- 操作系统：Ubuntu 22.04.5 LTS（WSL2）
 - 目标架构：RISC-V 64
-- 模拟器：QEMU
+- 模拟器：QEMU 7.0.0
 - 调试工具：RISC-V GDB
 - 实验内核：uCore
+- 交叉编译器：RISC-V GCC 15.1.0
+
+本实验使用修复后的启动环境，`Makefile` 采用 `-kernel` 参数加载内核镜像，`entry.S` 的启动页表同时包含低地址恒等映射和高地址映射。
 
 ## 3. 实验过程
 
@@ -274,19 +280,157 @@ x/4i $pc
 得到：
 
 ```asm
-0xffffffffc02000d6 <kern_init>:    auipc a0,0x6
-0xffffffffc02000da <kern_init+4>:  addi  a0,a0,-190
-0xffffffffc02000de <kern_init+8>:  auipc a2,0x6
-0xffffffffc02000e2 <kern_init+12>: addi  a2,a2,-102
+0xffffffffc02000d6 <kern_init>:     auipc a0,0x6
+0xffffffffc02000da <kern_init+4>:   addi  a0,a0,-190
+0xffffffffc02000de <kern_init+8>:   auipc a2,0x6
+0xffffffffc02000e2 <kern_init+12>:  addi  a2,a2,-102
 ```
 
 说明 CPU 已经成功到达内核高虚拟地址，且仍处于 Sv39 分页模式。
 
+### 3.6 QEMU MMU 日志与 TLB 填充验证
+
+前面通过 GDB 观察了分页开启、根页表内容以及虚拟地址到物理地址的计算过程。为了进一步验证实际运行中的地址转换，使用 QEMU 的 MMU 日志功能记录内核执行时的地址转换活动。
+
+#### 3.6.1 检查 QEMU 日志功能
+
+在终端执行：
+
+```bash
+qemu-system-riscv64 -d help
+```
+
+发现当前 QEMU 支持以下调试选项：
+
+```text
+mmu    log MMU-related activities
+int    show interrupts/exceptions in short format
+```
+
+其中，`mmu` 用于输出 MMU 相关活动，`int` 用于输出异常和中断相关记录。
+
+#### 3.6.2 启用 MMU 调试日志
+
+为了保持课程要求的 `make qemu` 启动方式，在 `Makefile` 的 QEMU 启动命令末尾增加可选参数变量：
+
+```makefile
+-kernel $(UCOREIMG) $(QEMUOPTS)
+```
+
+普通运行仍然执行：
+
+```bash
+make qemu
+```
+
+进行 MMU 调试时执行：
+
+```bash
+make qemu QEMUOPTS="-d mmu,int -D /tmp/lab2-mmu.log"
+```
+
+其中：
+
+- `-d mmu,int`：开启 MMU 与异常相关日志。
+- `-D /tmp/lab2-mmu.log`：将日志写入指定文件。
+
+运行后成功生成：
+
+```text
+/tmp/lab2-mmu.log
+```
+
+该次日志大小约为 346 KB。
+
+#### 3.6.3 提取高虚拟地址的 TLB 填充记录
+
+通过以下命令筛选内核高虚拟地址的访问记录：
+
+```bash
+grep -Ei 'riscv_cpu_tlb_fill (ad|address=) ffffffff' /tmp/lab2-mmu.log | head -40
+```
+
+其中，发现之前 GDB 调试过的 `kern_init()` 入口地址：
+
+```text
+riscv_cpu_tlb_fill ad ffffffffc02000d6 rw 2 mmu_idx 1
+```
+
+为了查看该地址对应的完整转换结果，进一步执行：
+
+```bash
+grep -A 3 -m 1 'riscv_cpu_tlb_fill ad ffffffffc02000d6' /tmp/lab2-mmu.log
+```
+
+得到：
+
+```text
+riscv_cpu_tlb_fill ad ffffffffc02000d6 rw 2 mmu_idx 1
+riscv_cpu_tlb_fill address=ffffffffc02000d6 ret 0 physical 00000000802000d6 prot 7
+riscv_cpu_tlb_fill PMP address=00000000802000d6 ret 0 prot 7 tlb_size 4096
+riscv_cpu_tlb_fill ad ffffffffc0204ff8 rw 1 mmu_idx 1
+```
+
+其中：
+
+- `ad ffffffffc02000d6`：待转换的内核高虚拟地址。
+- `rw 2`：表示指令取指访问。
+- `mmu_idx 1`：QEMU 内部使用的 MMU 上下文索引。
+- `ret 0`：本次地址转换成功。
+- `physical 00000000802000d6`：转换得到的物理地址。
+- `prot 7`：QEMU 内部记录的访问权限掩码。
+- `tlb_size 4096`：此次 QEMU 内部 TLB 缓存记录的粒度为 4096 字节。
+
+需要注意，启动页表采用的是 1 GiB 大页映射，而日志中的 `tlb_size 4096` 是此次模拟器内部缓存记录的粒度，并不表示 Sv39 的映射页大小变成了 4 KiB。
+
+![QEMU TLB 填充与地址转换日志](../images/gdb_tlb_fill.png)
+
+#### 3.6.4 对照 Sv39 页表分析结果
+
+前面通过 GDB 已经得到：
+
+```text
+satp = 0x8000000000080205
+根页表物理地址 = 0x80205000
+VPN[2] = 511
+PTE[511] = 0x200000cf
+```
+
+根据根页表中的 1 GiB 大页映射关系，计算得到：
+
+```text
+虚拟地址：0xffffffffc02000d6
+           ↓
+根页表项：PTE[511]
+           ↓
+物理地址：0x802000d6
+```
+
+而本次 QEMU 日志实际记录：
+
+```text
+address=ffffffffc02000d6
+ret 0
+physical 00000000802000d6
+```
+
+两次结果完全一致。
+
+由此说明，QEMU 对内核高虚拟地址的取指访问成功完成了地址转换，并得到了与 GDB 页表分析一致的物理地址。
+
+QEMU 的 `riscv_cpu_tlb_fill` 日志可以作为模拟器执行地址转换和 TLB 填充处理的证据，但它并不直接提供真实硬件的 TLB 命中率，也不代表已经观察到所有内部页表遍历步骤。
+
 ## 4. TLB 机制分析
 
-TLB（Translation Lookaside Buffer）用于缓存虚拟地址到物理地址的转换信息。
+TLB（Translation Lookaside Buffer）用于缓存虚拟地址到物理地址的转换信息，以减少重复页表查询产生的开销。
 
-当 CPU 访问虚拟地址时，如果 TLB 中已有对应的有效转换信息，就可以减少页表访问开销；否则可能需要通过硬件页表遍历获得映射结果。
+当 CPU 访问虚拟地址时，地址转换通常涉及以下过程：
+
+1. CPU 发起虚拟地址访问。
+2. 检查 TLB 中是否存在可用的地址转换信息。
+3. 如果存在有效的缓存结果，可以直接使用该转换信息。
+4. 如果没有对应的缓存结果，则需要执行页表查询，获得相应的物理地址和权限信息。
+5. 转换结果可以被缓存，以便后续访问使用。
 
 本实验在内核入口观察到了：
 
@@ -295,9 +439,42 @@ csrw satp,t0
 sfence.vma
 ```
 
-其中，`csrw satp,t0` 配置分页模式和根页表位置；`sfence.vma` 用于同步地址转换相关状态，避免继续使用不符合当前页表配置的旧转换信息。
+其中，`csrw satp,t0` 配置分页模式和根页表位置；`sfence.vma` 用于同步地址转换相关状态，使后续地址转换正确反映页表配置。
 
-本次实验没有直接读取 TLB 内部条目，也没有测量 TLB 命中率。因此，实验结论主要基于对 `satp`、`sfence.vma`、页表项以及内核地址转换过程的观察。
+在本次实验中，GDB 显示写入 `satp` 后：
+
+```text
+satp = 0x8000000000080205
+```
+
+CPU 启用了 Sv39 分页模式。
+
+随后，通过读取根页表，观察到：
+
+```text
+PTE[2]   = 0x200000cf
+PTE[511] = 0x200000cf
+```
+
+这两个页表项分别提供低地址恒等映射和内核高地址映射，均映射到相同的物理内存区域。
+
+在 QEMU 的 MMU 调试日志中，进一步观察到：
+
+```text
+riscv_cpu_tlb_fill ad ffffffffc02000d6 rw 2 mmu_idx 1
+riscv_cpu_tlb_fill address=ffffffffc02000d6 ret 0 physical 00000000802000d6 prot 7
+```
+
+这说明模拟器在处理内核高虚拟地址的取指请求时，执行了地址转换和 TLB 填充相关处理，成功获得物理地址 `0x802000d6`。
+
+因此，本次实验从两个角度验证了 Sv39 地址转换：
+
+- **GDB 调试：** 通过 `satp`、根页表项和 VPN 索引计算物理地址。
+- **QEMU MMU 日志：** 通过模拟器记录的 TLB 填充操作观察实际地址转换结果。
+
+本次实验未直接读取真实硬件的 TLB 内部条目，也没有测量 TLB 命中率。同时，由于启动页表使用的是根页表级别的 1 GiB 大页映射，地址转换在根页表即可完成，不需要继续访问下两级页表。
+
+因此，本次记录主要反映 QEMU 模拟的地址转换与 TLB 填充过程，而不是完整的硬件 TLB 性能测试。
 
 ## 5. 实验总结
 
@@ -307,4 +484,10 @@ sfence.vma
 
 本实验使用的是根页表级别的 1 GiB 大页映射，因此虽然 Sv39 支持三级页表，实际启动映射并不需要完整遍历三级页表。
 
-通过 GDB 逐条观察指令和寄存器变化，比单纯阅读源码更容易理解 MMU 的初始化过程及其与 TLB 的关系。
+在原有 GDB 调试的基础上，本次还使用了 QEMU 的 `mmu` 调试日志，获取到 `riscv_cpu_tlb_fill` 记录，观察了内核高虚拟地址 `0xffffffffc02000d6` 对应的地址转换过程。
+
+日志显示转换成功，得到物理地址 `0x802000d6`，与之前 GDB 的计算结果完全一致。这使得实验不仅能够从页表结构推导转换结果，还能通过模拟器的实际运行日志进行验证。
+
+通过本次实验，我对 MMU、Sv39 页表和 TLB 的关系有了更具体的认识：页表保存地址映射关系，MMU 根据页表或缓存的转换信息完成地址转换，而 TLB 的作用是缓存转换结果、提高地址访问效率。
+
+相比只阅读源码，GDB 的单步调试和 QEMU MMU 日志能够更直观地帮助理解内核从物理地址启动、开启分页，再到高虚拟地址运行的过程。
