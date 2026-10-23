@@ -165,28 +165,29 @@ qemu: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 		-machine virt \
 		-nographic \
 		-bios default \
-		-device loader,file=$(UCOREIMG),addr=0x80200000
+		-kernel $(UCOREIMG)
 
 debug: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 	$(V)$(QEMU) \
 		-machine virt \
 		-nographic \
 		-bios default \
-		-device loader,file=$(UCOREIMG),addr=0x80200000\
+		-kernel $(UCOREIMG)\
 		-s -S
 
-gdb:
-	riscv64-unknown-elf-gdb \
-    -ex 'file bin/kernel' \
-    -ex 'set arch riscv:rv64' \
-    -ex 'target remote localhost:1234'
+gdb: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
+	@$(QEMU) -machine virt -nographic -bios default -kernel $(UCOREIMG) -s -S </dev/null >/tmp/lab2-qemu-gdb.log 2>&1 & \
+	qemu_pid=$$!; \
+	trap 'kill $$qemu_pid >/dev/null 2>&1 || true' EXIT INT TERM; \
+	sleep 1; \
+	riscv64-unknown-elf-gdb -ex 'file bin/kernel' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
 test: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 	$(V)$(QEMU) \
 		-machine virt \
 		-nographic \
 		-bios default \
-		-device loader,file=$(UCOREIMG),addr=0x80200000
+		-kernel $(UCOREIMG)
 spike: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 	$(V)$(SPIKE) $(UCOREIMG)
 

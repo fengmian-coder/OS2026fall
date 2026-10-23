@@ -143,6 +143,16 @@ pmm_text = read_text(pmm)
 if "#include <test_lab2.h>" in pmm_text:
     die("pmm.c already includes test_lab2.h; the skeleton was injected")
 
+# The normal demo uses Buddy, while the official Lab2 grading test
+# explicitly requires best_fit_pmm_manager.  Only switch the temporary
+# grading copy; the student's real source tree remains unchanged.
+old_manager = "pmm_manager = &buddy_pmm_manager;"
+new_manager = "pmm_manager = &best_fit_pmm_manager;"
+if old_manager not in pmm_text:
+    die("Buddy pmm_manager assignment not found")
+pmm_text = pmm_text.replace(old_manager, new_manager, 1)
+write_text(pmm, pmm_text)
+
 # Copy test sources into kern/test/
 os.makedirs(testdir, exist_ok=True)
 for name in ("test_lab2.c", "test_lab2.h"):
