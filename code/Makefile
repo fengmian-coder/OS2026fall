@@ -165,7 +165,7 @@ qemu: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 		-machine virt \
 		-nographic \
 		-bios default \
-		-kernel $(UCOREIMG)
+		-kernel $(UCOREIMG) $(QEMUOPTS)
 
 debug: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 	$(V)$(QEMU) \
