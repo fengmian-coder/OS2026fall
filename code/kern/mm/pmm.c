@@ -63,38 +63,309 @@ size_t nr_free_pages(void) {
 }
 
 //lab2 function1 2412074
-static void page_init(void) {
-    // 获取物理内存信息
-    uint64_t mem_base = get_memory_base();
-    uint64_t mem_size = get_memory_size();
 
-    // 检查设备树返回的内存信息是否合法
-    assert(mem_base == DRAM_BASE);
-    assert(mem_size > 0);
-    assert(mem_size <= PHYSICAL_MEMORY_END - mem_base);
+/*
+ * Challenge helper:
+ * 把一段已经确认可用的物理地址范围交给当前 PMM。
+ * 起止地址会自动按页边界收缩。
+ */
+static size_t
+init_usable_range(uintptr_t begin, uintptr_t end) {
+    begin = ROUNDUP(begin, PGSIZE);
+    end = ROUNDDOWN(end, PGSIZE);
 
-    // 初始化虚拟地址与物理地址偏移
-    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+    if (begin >= end) {
+        return 0;
+    }
 
-    // 计算物理页号上界
-    npage = (mem_base + mem_size) / PGSIZE;
+    /* 当前 pages[] 只描述 [nbase, npage) 的物理页。 */
+    if (begin / PGSIZE < nbase ||
+        (end - 1) / PGSIZE >= npage) {
+        return 0;
+    }
 
-    // 获取内核结束地址
-    extern char end[];
+    size_t count = (end - begin) / PGSIZE;
 
-    // 设置物理页描述符数组的起始位置
-    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+    init_memmap(pa2page(begin), count);
 
-    // 计算需要管理的物理页数量
-    size_t page_count = npage - nbase;
-
-    // 计算 Page 数组结束后的第一个页对齐虚拟地址
-    uintptr_t freemem = ROUNDUP(
-    (uintptr_t)pages + page_count * sizeof(struct Page),
-    PGSIZE
+    cprintf(
+        "  Usable RAM: 0x%016lx - 0x%016lx (%lu pages)\n",
+        begin, end - 1, count
     );
 
-    // 初始化所有物理页描述符，先将它们标记为保留状态
+    return count;
+}
+
+/*
+ * 判断 [begin, end) 是否完整位于某个 DTB RAM region 中。
+ * 主要用于确认 Page 描述符数组本身放在真实 RAM 中。
+ */
+static int
+range_inside_dtb_ram(uintptr_t begin, uintptr_t end) {
+    size_t count = get_memory_region_count();
+
+    for (size_t i = 0; i < count; i++) {
+        uint64_t base, size;
+
+        if (get_memory_region(i, &base, &size) != 0 ||
+            size == 0) {
+            continue;
+        }
+
+        if (size > (uint64_t)-1 - base) {
+            continue;
+        }
+
+        uint64_t region_end = base + size;
+
+        if ((uint64_t)begin >= base &&
+            (uint64_t)end <= region_end) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * 判断 [begin, end) 是否与 DTB 保留区发生重叠。
+ */
+static int
+range_overlaps_reserved(uintptr_t begin, uintptr_t end) {
+    size_t count = get_reserved_region_count();
+
+    for (size_t i = 0; i < count; i++) {
+        uint64_t base, size;
+
+        if (get_reserved_region(i, &base, &size) != 0 ||
+            size == 0) {
+            continue;
+        }
+
+        if (size > (uint64_t)-1 - base) {
+            continue;
+        }
+
+        uint64_t reserved_end = base + size;
+
+        if ((uint64_t)begin < reserved_end &&
+            base < (uint64_t)end) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * 对一段 RAM 区域减去所有 reserved region，
+ * 将剩余的若干连续区间分别交给 PMM。
+ *
+ * reserved region 不要求预先排序。
+ */
+static size_t
+init_ram_excluding_reserved(uintptr_t begin, uintptr_t end) {
+    size_t total = 0;
+    uintptr_t cursor = begin;
+
+    while (cursor < end) {
+        int found = 0;
+        uintptr_t next_begin = end;
+        uintptr_t next_end = end;
+
+        size_t count = get_reserved_region_count();
+
+        for (size_t i = 0; i < count; i++) {
+            uint64_t rbase64, rsize64;
+
+            if (get_reserved_region(
+                    i, &rbase64, &rsize64) != 0 ||
+                rsize64 == 0) {
+                continue;
+            }
+
+            if (rsize64 > (uint64_t)-1 - rbase64) {
+                continue;
+            }
+
+            uint64_t rend64 = rbase64 + rsize64;
+
+            /*
+             * 没有与 [cursor, end) 相交。
+             */
+            if (rend64 <= (uint64_t)cursor ||
+                rbase64 >= (uint64_t)end) {
+                continue;
+            }
+
+            uintptr_t overlap_begin =
+                rbase64 > (uint64_t)cursor
+                    ? (uintptr_t)rbase64
+                    : cursor;
+
+            uintptr_t overlap_end =
+                rend64 < (uint64_t)end
+                    ? (uintptr_t)rend64
+                    : end;
+
+            /*
+             * 找离 cursor 最近的保留区域。
+             * 如果起点相同，保留结束更晚的那个。
+             */
+            if (!found ||
+                overlap_begin < next_begin ||
+                (overlap_begin == next_begin &&
+                 overlap_end > next_end)) {
+                found = 1;
+                next_begin = overlap_begin;
+                next_end = overlap_end;
+            }
+        }
+
+        /*
+         * 后面已经没有 reserved region。
+         */
+        if (!found) {
+            total += init_usable_range(cursor, end);
+            break;
+        }
+
+        /*
+         * reserved 前面的部分可以使用。
+         */
+        if (cursor < next_begin) {
+            total += init_usable_range(cursor, next_begin);
+        }
+
+        /*
+         * 跳过 reserved。
+         */
+        if (next_end <= cursor) {
+            break;
+        }
+
+        cursor = next_end;
+    }
+
+    return total;
+}
+
+static void
+page_init(void) {
+    size_t region_count = get_memory_region_count();
+
+    assert(region_count > 0);
+
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    /*
+     * 当前实验内核的 Page 编号仍以 DRAM_BASE 为起点。
+     * 因此先从 DTB 找出当前内核物理地址窗口中最高的 RAM 末端。
+     *
+     * DTB 可以发现窗口以外的 RAM，但在不重构
+     * nbase / 内核直接映射之前，不把它交给 PMM。
+     */
+    uintptr_t highest_end = DRAM_BASE;
+
+    for (size_t i = 0; i < region_count; i++) {
+        uint64_t base, size;
+
+        if (get_memory_region(i, &base, &size) != 0 ||
+            size == 0) {
+            continue;
+        }
+
+        if (size > (uint64_t)-1 - base) {
+            continue;
+        }
+
+        uint64_t end = base + size;
+
+        /*
+         * 与当前内核支持窗口求交集。
+         */
+        uint64_t clipped_begin =
+            base < DRAM_BASE ? DRAM_BASE : base;
+
+        uint64_t clipped_end =
+            end > PHYSICAL_MEMORY_END
+                ? PHYSICAL_MEMORY_END
+                : end;
+
+        if (clipped_begin >= clipped_end) {
+            cprintf(
+                "PMM skips RAM region %lu outside current kernel window\n",
+                i
+            );
+            continue;
+        }
+
+        if (clipped_begin != base ||
+            clipped_end != end) {
+            cprintf(
+                "PMM clips RAM region %lu to current kernel window\n",
+                i
+            );
+        }
+
+        if (clipped_end > highest_end) {
+            highest_end = (uintptr_t)clipped_end;
+        }
+    }
+
+    assert(highest_end > DRAM_BASE);
+
+    /*
+     * pages[] 覆盖 DRAM_BASE 到最高可管理物理页。
+     * 中间如果有地址洞，其 Page 描述符保持 Reserved。
+     */
+    npage = ROUNDDOWN(highest_end, PGSIZE) / PGSIZE;
+
+    assert(npage > nbase);
+
+    extern char end[];
+
+    pages = (struct Page *)ROUNDUP(
+        (uintptr_t)end,
+        PGSIZE
+    );
+
+    size_t page_count = npage - nbase;
+
+    uintptr_t freemem = ROUNDUP(
+        (uintptr_t)pages +
+            page_count * sizeof(struct Page),
+        PGSIZE
+    );
+
+    uintptr_t page_array_begin_pa =
+        PADDR((uintptr_t)pages);
+
+    uintptr_t free_start_pa =
+        PADDR(freemem);
+
+    /*
+     * pages[] 自身必须位于真实 RAM 中，而且不能占用 DTB
+     * 明确声明的 reserved-memory / memreserve 区域。
+     */
+    assert(
+        range_inside_dtb_ram(
+            page_array_begin_pa,
+            free_start_pa
+        )
+    );
+
+    assert(
+        !range_overlaps_reserved(
+            page_array_begin_pa,
+            free_start_pa
+        )
+    );
+
+    /*
+     * 先把整个描述符跨度全部标为 Reserved。
+     * 地址洞、reserved-memory 和内核占用区域因此默认都不会分配。
+     */
     for (size_t i = 0; i < page_count; i++) {
         struct Page *p = &pages[i];
 
@@ -104,34 +375,88 @@ static void page_init(void) {
         SetPageReserved(p);
     }
 
-    // 将可用内存起始位置转换为物理地址
-    uintptr_t free_start_pa = PADDR(freemem);
+    cprintf(
+        "PMM physical memory regions from DTB: %lu\n",
+        region_count
+    );
 
-    // 计算物理内存结束地址
-    uintptr_t mem_end_pa = mem_base + mem_size;
+    cprintf(
+        "Page metadata: 0x%016lx - 0x%016lx\n",
+        page_array_begin_pa,
+        free_start_pa - 1
+    );
 
-    // 确保空闲内存范围合法
-    assert(free_start_pa >= mem_base);
-    assert(free_start_pa < mem_end_pa);
+    /*
+     * 逐个处理 DTB RAM region。
+     *
+     * 只有满足：
+     *   1. 位于当前内核可管理物理窗口；
+     *   2. 位于 Page 描述符数组之后；
+     *   3. 不属于 reserved region；
+     *
+     * 的物理页才真正交给 PMM。
+     */
+    size_t total_free = 0;
 
-    // 将物理内存结束地址向下对齐到页边界
-    uintptr_t free_end_pa = ROUNDDOWN(mem_end_pa, PGSIZE);
+    for (size_t i = 0; i < region_count; i++) {
+        uint64_t base64, size64;
 
-    // 确保至少存在一个可用物理页
-    assert(free_start_pa < free_end_pa);
+        if (get_memory_region(
+                i, &base64, &size64) != 0 ||
+            size64 == 0) {
+            continue;
+        }
 
-    // 计算可用物理页数量
-    size_t nfree = (free_end_pa - free_start_pa) / PGSIZE;
+        if (size64 > (uint64_t)-1 - base64) {
+            continue;
+        }
 
-    // 将可用物理页交给 First-Fit 分配器管理
-    init_memmap(pa2page(free_start_pa), nfree);
+        uint64_t end64 = base64 + size64;
 
-    // 输出空闲页数量，方便调试
-    cprintf("Free physical pages: %lu\n", nfree);
+        uintptr_t begin =
+            base64 < DRAM_BASE
+                ? DRAM_BASE
+                : (uintptr_t)base64;
 
-    // 输出调试信息
-    cprintf("Memory base: 0x%016lx\n", mem_base);
-    cprintf("Memory size: 0x%016lx\n", mem_size);
+        uintptr_t end_pa =
+            end64 > PHYSICAL_MEMORY_END
+                ? PHYSICAL_MEMORY_END
+                : (uintptr_t)end64;
+
+        if (begin >= end_pa) {
+            continue;
+        }
+
+        /*
+         * 内核、Page 数组以及它们之前的空间均不作为空闲页。
+         */
+        if (begin < free_start_pa) {
+            begin = free_start_pa;
+        }
+
+        if (begin >= end_pa) {
+            continue;
+        }
+
+        cprintf(
+            "RAM region %lu candidate: "
+            "0x%016lx - 0x%016lx\n",
+            i, begin, end_pa - 1
+        );
+
+        total_free +=
+            init_ram_excluding_reserved(
+                begin,
+                end_pa
+            );
+    }
+
+    assert(total_free > 0);
+
+    cprintf(
+        "Free physical pages from DTB regions: %lu\n",
+        total_free
+    );
 }
 
 /* pmm_init - initialize the physical memory management */
