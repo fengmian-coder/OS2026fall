@@ -7,6 +7,7 @@
 #include <mmu.h>
 #include <pmm.h>
 #include <sbi.h>
+#include <slub.h>
 #include <stdio.h>
 #include <string.h>
 #include <riscv.h>
@@ -474,6 +475,12 @@ void pmm_init(void) {
 
     // use pmm->check to verify the correctness of the alloc/free function in a pmm
     check_alloc_page();
+
+    /*
+     * Lab2 Bonus: initialize the SLUB small-object allocator
+     * after the underlying physical page allocator is ready.
+     */
+    slub_init();
 
     extern char boot_page_table_sv39[];
     satp_virtual = (pte_t*)boot_page_table_sv39;
