@@ -1,5 +1,13 @@
 # Lab2 物理内存管理实验报告
 
+## 实验总体说明
+
+本实验围绕 uCore Lab2 的物理内存管理机制展开，实验内容覆盖物理内存初始化、First-Fit、Best-Fit、Buddy System，以及基于 GDB 的 Sv39、MMU 与 TLB 调试分析。
+
+在基础实验之外，本组进一步完成了两个拓展内容：硬件内存范围 Challenge，以及 Sv39 GDB 智能调试流程。硬件内存范围 Challenge 将原有单一连续 RAM 的处理方式扩展为根据 DTB 中的 RAM region 与 reserved region 确定可管理物理内存；Sv39 GDB 智能调试流程则通过自定义 GDB 脚本辅助完成地址拆分、页表查询和异常地址分析。
+
+最终集成版本保留 `make qemu`、`make grade` 和 `make gdb` 三条现场演示命令。其中 `make grade` 的 Page Init 与 Best-Fit 测试均通过，总分为 20/20。
+
 ## 1. 物理内存初始化与 First-Fit
 
 
@@ -519,14 +527,14 @@ make gdb
 
 本部分实验使用 QEMU 和 GDB 调试 RISC-V 内核启动过程，重点观察 `satp` 寄存器的变化，理解 Sv39 分页机制、页表地址转换过程以及 TLB 的作用。
 
-此外，结合 QEMU 提供的 MMU 调试日志，观察模拟器的 TLB 填充与地址转换过程，将实际运行日志与 GDB 调试结果进行对照验证。
+此外，结合 QEMU 提供的 MMU 调试日志，观察模拟器的 TLB 填充与地址转换过程，将实际运行日志与 GDB 调试结果进行对照验证；进一步使用宿主机 GDB 对 QEMU 源码中的地址翻译与软件 TLB 填充过程进行验证。
 
 ### 2. 实验环境
 
 - 操作系统：Ubuntu 22.04.5 LTS（WSL2）
 - 目标架构：RISC-V 64
 - 模拟器：QEMU 7.0.0
-- 调试工具：RISC-V GDB
+- 调试工具：RISC-V GDB（内核调试）、宿主机 GDB 12.1（QEMU 源码级调试）
 - 实验内核：uCore
 - 交叉编译器：RISC-V GCC 15.1.0
 
@@ -939,6 +947,183 @@ physical 00000000802000d6
 
 QEMU 的 `riscv_cpu_tlb_fill` 日志可以作为模拟器执行地址转换和 TLB 填充处理的证据，但它并不直接提供真实硬件的 TLB 命中率，也不代表已经观察到所有内部页表遍历步骤。
 
+#### 3.7 QEMU 源码级 GDB 调试与 TLB 填充验证（双调试视角）
+
+前面使用 RISC-V GDB 调试运行在 QEMU 内部的 uCore，能够观察 `satp`、PC 和 Sv39 页表项；通过 QEMU 的 `mmu` 日志，可以核对最终地址转换结果。为了进一步确认这些记录来自 QEMU 内部的哪段代码，本次增加了**宿主机 GDB 对 QEMU 模拟器自身的源码级调试**。这两种调试视角分别面向内核与模拟器，属于双重 GDB 调试思路；本次实验分别完成了两种视角的调试，**未实际验证两个 GDB 同时连接并协同单步运行**。
+
+##### 3.7.1 调试环境与目标
+
+宿主机使用 Ubuntu GDB 12.1，调试对象为带调试信息、未剥离符号的 QEMU 7.0.0：
+
+```text
+QEMU executable: /opt/qemu/bin/qemu-system-riscv64
+QEMU source:     /home/fengmian/qemu-7.0.0/target/riscv/cpu_helper.c
+Host GDB:        GNU gdb 12.1
+```
+
+目标是捕获内核高虚拟地址 `0xffffffffc02000d6` 的一次指令取指翻译，观察 QEMU 怎样计算物理地址，并确认是否调用 `tlb_set_page()` 建立软件 TLB 条目。调试前先退出原有 QEMU 进程，避免多个实例影响结果。
+
+##### 3.7.2 在 QEMU MMU 函数中设置条件断点
+
+在 `code` 目录中，使用宿主机 GDB 启动 QEMU 程序：
+
+```bash
+cd ~/os-lab/OS2026fall/code
+gdb /opt/qemu/bin/qemu-system-riscv64
+```
+
+在宿主机 GDB 中执行：
+
+```gdb
+set pagination off
+break riscv_cpu_tlb_fill
+set args -machine virt -nographic -bios default -kernel bin/ucore.img
+run
+```
+
+第一次断点命中 `target/riscv/cpu_helper.c:1184`，访问地址为 `0x1000`，属于启动初期的取指活动。为避免每次地址转换都中断运行，关闭原始断点，并只针对内核高虚拟地址设置条件断点：
+
+```gdb
+disable 1
+break riscv_cpu_tlb_fill if address == 0xffffffffc02000d6
+continue
+```
+
+实际命中输出为：
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 2,
+riscv_cpu_tlb_fill (...,
+    address=18446744072637907158,
+    access_type=MMU_INST_FETCH,
+    mmu_idx=1,
+    probe=false, retaddr=0)
+at ../target/riscv/cpu_helper.c:1184
+```
+
+用 `p/x address` 进一步确认：
+
+```text
+$1 = 0xffffffffc02000d6
+```
+
+说明 QEMU 已进入该内核高虚拟地址对应的取指翻译处理函数。`MMU_INST_FETCH` 表示指令取指，`mmu_idx=1` 是 QEMU 为本次访问使用的 MMU 上下文索引。
+
+##### 3.7.3 分析地址翻译调用路径
+
+在断点位置执行：
+
+```gdb
+info args
+bt
+list 1265,1310
+```
+
+调用栈中可观察到以下主要路径（由调用者到被调用者）：
+
+```text
+tb_lookup()
+  -> tb_htable_lookup()
+  -> get_page_addr_code()
+  -> get_page_addr_code_hostp()
+  -> tlb_fill()
+  -> riscv_cpu_tlb_fill()
+```
+
+其中 `tlb_fill()` 位于 `accel/tcg/cputlb.c`，`riscv_cpu_tlb_fill()` 位于 `target/riscv/cpu_helper.c`。前者属于 QEMU 通用的软件 TLB 处理流程，后者负责 RISC-V 目标架构的相关地址翻译处理。
+
+在 QEMU 7.0.0 的 `cpu_helper.c` 第 1276～1284 行，普通单阶段翻译路径为：
+
+```c
+} else {
+    /* Single stage lookup */
+    ret = get_physical_address(env, &pa, &prot, address, NULL,
+                               access_type, mmu_idx, true, false, false);
+
+    qemu_log_mask(CPU_LOG_MMU,
+                  "%s address=%" VADDR_PRIx " ret %d physical "
+                  TARGET_FMT_plx " prot %d\n",
+                  __func__, address, ret, pa, prot);
+```
+
+这段代码调用 `get_physical_address()` 获取物理地址及权限，再通过 MMU 日志记录转换结果。我们实际确认该函数调用位置，但**没有进入 `get_physical_address()` 内部逐级单步验证每次 PTE 读取**。
+
+##### 3.7.4 直接查看地址翻译后的物理地址
+
+为了在地址翻译函数返回后读取结果，继续设置一次性断点：
+
+```gdb
+tbreak ../target/riscv/cpu_helper.c:1281
+continue
+p/x address
+p/x pa
+p ret
+```
+
+由于当前 QEMU 编译包含优化，断点实际停在 `cpu_helper.c:1286`，读到以下结果：
+
+```text
+address = 0xffffffffc02000d6
+pa      = 0x802000d6
+ret     = <optimized out>
+```
+
+`ret` 的值因为编译优化未能由 GDB 直接恢复，不能仅凭这一处寄存器观察宣称它可读；但实际获得的 `pa = 0x802000d6` 与 Sv39 页表手工计算、内核 GDB 及前述 MMU 日志一致，而且随后成功命中了 TLB 填充函数，因此该次转换路径确实继续进入了成功分支。
+
+##### 3.7.5 验证软件 TLB 条目填充
+
+在 `cpu_helper.c` 第 1303～1306 行，翻译成功后的代码为：
+
+```c
+if (ret == TRANSLATE_SUCCESS) {
+    tlb_set_page(cs, address & ~(tlb_size - 1), pa & ~(tlb_size - 1),
+                 prot, mmu_idx, tlb_size);
+    return true;
+}
+```
+
+在 GDB 中设置一次性断点并继续执行：
+
+```gdb
+tbreak tlb_set_page
+continue
+bt 4
+info args
+```
+
+实际在 `accel/tcg/cputlb.c:1281` 命中 `tlb_set_page()`，调用栈为：
+
+```text
+#0 tlb_set_page()
+#1 riscv_cpu_tlb_fill() at target/riscv/cpu_helper.c:1304
+#2 tlb_fill() at accel/tcg/cputlb.c:1313
+#3 get_page_addr_code_hostp()
+```
+
+相关参数的实际值为：
+
+```text
+vaddr   = 0xffffffffc0200000
+paddr   = 0x80200000
+prot    = 7
+mmu_idx = 1
+size    = 4096
+```
+
+这表示 QEMU 将包含目标指令的虚拟页 `0xffffffffc0200000` 对应到物理页 `0x80200000`，并将本次映射信息传递给软件 TLB 填充函数。这里的 `size=4096` 是此次 QEMU 软件 TLB 填充的粒度，并不改变启动页表中 L2 叶子 PTE 对应的 **1 GiB 映射大小**。
+
+##### 3.7.6 实验结论与范围
+
+本次调试将之前三种观察结果联系起来：
+
+| 验证方式 | 观察到的结果 |
+|---|---|
+| 内核 GDB + Sv39 页表分析 | `0xffffffffc02000d6 -> 0x802000d6` |
+| QEMU MMU/TLB 日志 | `ret 0 physical 00000000802000d6` |
+| QEMU 源码级 GDB | `pa = 0x802000d6`，随后进入 `tlb_set_page()` |
+
+本实验验证了目标取指请求经过 QEMU 的 RISC-V 翻译代码，并调用软件 TLB 填充函数。其范围是**QEMU 模拟器的源码级地址翻译与缓存处理验证**，不涉及真实硬件 TLB 的命中率测量，也不等同于已经完成“双 GDB 同时运行”或完整的三级页表逐项单步调试。本节不另附截图，以保留的调试命令、源码位置和实际输出作为实验记录。
+
 ### 4. TLB 机制分析
 
 TLB（Translation Lookaside Buffer）用于缓存虚拟地址到物理地址的转换信息，以减少重复页表查询产生的开销。
@@ -986,10 +1171,11 @@ riscv_cpu_tlb_fill address=ffffffffc02000d6 ret 0 physical 00000000802000d6 prot
 
 这说明模拟器在处理内核高虚拟地址的取指请求时，执行了地址转换和 TLB 填充相关处理，成功获得物理地址 `0x802000d6`。
 
-因此，本次实验从两个角度验证了 Sv39 地址转换：
+因此，本次实验从三个角度验证了 Sv39 地址转换：
 
-- **GDB 调试：** 通过 `satp`、根页表项和 VPN 索引计算物理地址。
+- **内核 GDB 调试：** 通过 `satp`、根页表项和 VPN 索引计算物理地址。
 - **QEMU MMU 日志：** 通过模拟器记录的 TLB 填充操作观察实际地址转换结果。
+- **QEMU 源码级 GDB：** 在 `riscv_cpu_tlb_fill()` 中捕获目标地址，读取转换后的 `pa`，并确认进入 `tlb_set_page()`。
 
 本次实验未直接读取真实硬件的 TLB 内部条目，也没有测量 TLB 命中率。同时，由于启动页表使用的是根页表级别的 1 GiB 大页映射，地址转换在根页表即可完成，不需要继续访问下两级页表。
 
@@ -1009,7 +1195,7 @@ riscv_cpu_tlb_fill address=ffffffffc02000d6 ret 0 physical 00000000802000d6 prot
 
 通过本次实验，我对 MMU、Sv39 页表和 TLB 的关系有了更具体的认识：页表保存地址映射关系，MMU 根据页表或缓存的转换信息完成地址转换，而 TLB 的作用是缓存转换结果、提高地址访问效率。
 
-相比只阅读源码，GDB 的单步调试和 QEMU MMU 日志能够更直观地帮助理解内核从物理地址启动、开启分页，再到高虚拟地址运行的过程。
+相比只阅读源码，内核 GDB 单步调试、QEMU MMU 日志和 QEMU 源码级 GDB 断点能够从不同层面帮助理解内核开启分页、高虚拟地址运行以及软件 TLB 填充的过程。本次分别验证了内核与模拟器两种调试视角，但未实际进行双 GDB 同时协同单步。
 
 
 ## 5. 硬件内存范围 Challenge
@@ -1921,3 +2107,41 @@ riscv_cpu_tlb_fill PMP address=00000000802000d6 ret 0 prot 7 tlb_size 4096
 此外，通过将脚本结果与之前的 QEMU `riscv_cpu_tlb_fill` 日志进行对照，进一步验证了工具在当前实验环境下的地址转换结果。
 
 目前工具已经具备基本的教学演示价值，但 L1、L0 页表路径和更完整的访问权限检查还需要进一步测试和完善。后续可以继续扩展工具功能，并根据课程要求整理演示材料，尝试贡献至课件库。
+
+
+## 7. 最终集成测试与小组分工
+
+### 7.1 最终集成测试
+
+完成全部必做内容和拓展内容后，对最终版本重新进行了整体回归测试。
+
+\`make qemu\` 能够正常完成 OpenSBI 到 uCore 的启动，系统使用 Buddy System 管理物理页，同时能够从 DTB 中识别 RAM 与保留物理内存区域。运行过程中输出 \`check_alloc_page() succeeded!\`。
+
+\`make grade\` 的最终结果为：
+
+```text
+-check page init: OK
+-check best fit: OK
+Total Score: 20/20
+```
+
+\`make gdb\` 能够自动启动 QEMU 并连接 GDB，初始停在 \`0x0000000000001000\`，退出后无残留 QEMU 进程。
+
+### 7.2 拓展内容
+
+本组在基础实验之外完成了两项拓展工作：
+
+1. **硬件内存范围 Challenge**：扩展 DTB 解析，支持 RAM region、reserved-memory 和 FDT reservation block，并依据实际可用物理内存范围初始化 PMM。
+2. **Sv39 GDB 智能调试流程**：通过 \`tools/sv39/sv39_walk.gdb\` 辅助分析 Sv39 虚拟地址、satp、页表项以及有效和无效地址转换，并结合 QEMU MMU 日志进行验证。
+
+### 7.3 小组分工
+
+| 成员 | 主要工作 |
+|---|---|
+| 成员1 | 物理内存初始化、First-Fit、相关测试与报告整理 |
+| 成员2（学号 2414029） | Best-Fit、GDB / Sv39 / MMU / TLB 调试分析、QEMU 源码级 GDB 调试、Sv39 GDB 智能调试流程 |
+| 成员3 | Buddy System、硬件内存范围 Challenge、最终集成测试与总报告整理 |
+
+### 7.4 实验总结
+
+通过本次实验，我们从物理内存探测、Page 描述符初始化开始，逐步理解并实现了不同的物理页分配策略，同时结合 Sv39 页表和 GDB 调试观察了虚拟地址到物理地址的转换过程。Buddy System 和 DTB 内存范围扩展进一步加深了对连续物理页管理、地址空洞以及保留内存处理方式的理解。智能 GDB 调试流程则将原本需要手工计算的 Sv39 地址转换过程进行了工具化，方便后续调试和验证。
