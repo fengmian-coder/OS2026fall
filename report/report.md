@@ -2108,10 +2108,441 @@ riscv_cpu_tlb_fill PMP address=00000000802000d6 ret 0 prot 7 tlb_size 4096
 
 目前工具已经具备基本的教学演示价值，但 L1、L0 页表路径和更完整的访问权限检查还需要进一步测试和完善。后续可以继续扩展工具功能，并根据课程要求整理演示材料，尝试贡献至课件库。
 
+## 7. SLUB 小对象分配 Challenge
 
-## 7. 最终集成测试与小组分工
+### 7.1 实验目的
 
-### 7.1 最终集成测试
+Buddy System 主要以物理页为单位进行内存分配，一个基础页大小为 4 KiB。对于几十字节或几百字节的小对象，如果每次都直接申请完整物理页，会造成较大的空间浪费。
+
+因此，本次实验在现有 Buddy 物理页分配器之上增加了一个简单的 SLUB 小对象分配层。Buddy 继续负责完整物理页的分配与回收，SLUB 则从 Buddy 获取物理页，并进一步在页内划分多个固定大小的小对象。
+
+本次新增文件：
+
+- `kern/mm/slub.c`
+- `kern/mm/slub.h`
+
+并在 `pmm_init()` 中加入：
+
+```c
+slub_init();
+```
+
+使 SLUB 在底层物理内存管理器初始化完成后启动。
+
+### 7.2 SLUB 与 Buddy 的关系
+
+本次实现中的内存管理层次如下：
+
+```text
+kmalloc / kfree
+        ↓
+      SLUB
+        ↓
+alloc_page / free_page
+        ↓
+   pmm_manager
+        ↓
+ Buddy System
+```
+
+当某个 SLUB cache 中不存在可用 slab 时，`slub_grow()` 调用 `alloc_page()` 向 Buddy 申请一个新的 4 KiB 物理页。
+
+当一个 slab 已经完全空闲并需要回收时，`slub_reap()` 调用 `free_page()` 将该物理页重新归还 Buddy。
+
+因此 SLUB 并不是 Buddy 的替代算法，而是建立在 Buddy 之上的小对象分配层。
+
+### 7.3 Size Class 设计
+
+本次实现共建立 8 种固定大小的 cache：
+
+```text
+16
+32
+64
+128
+256
+512
+1024
+2048 bytes
+```
+
+对应代码为：
+
+```c
+static const size_t slub_sizes[SLUB_CACHE_COUNT] = {
+    16, 32, 64, 128,
+    256, 512, 1024, 2048
+};
+```
+
+执行 `kmalloc(size)` 时，会选择第一个能够容纳请求大小的 size class。
+
+例如：
+
+```text
+kmalloc(24)
+→ 16 字节不足
+→ 使用 32-byte cache
+```
+
+因此 24 字节请求实际占用一个 32 字节对象槽，会产生少量内部碎片。
+
+对于大于 2048 字节的请求，本实现直接退化为连续物理页分配。
+
+### 7.4 Slab 页面结构
+
+本实现中每个 slab 使用一个 4 KiB 物理页。
+
+页面结构大致为：
+
+```text
++-----------------------------+
+| struct slub_page            |
+| magic                       |
+| cache                       |
+| Page *                      |
+| slab_link                   |
+| free_object                 |
+| inuse / total               |
++-----------------------------+
+| object 0                    |
++-----------------------------+
+| object 1                    |
++-----------------------------+
+| object 2                    |
++-----------------------------+
+| ...                         |
++-----------------------------+
+```
+
+页面开始位置保存 `struct slub_page` 元数据，其余空间按照当前 cache 的 `object_size` 划分。
+
+一个页面能够保存的对象数约为：
+
+```text
+(PGSIZE - header_size) / object_size
+```
+
+### 7.5 Free、Partial 与 Full 链表
+
+每个 `slub_cache` 维护三条 slab 链表：
+
+```text
+slabs_free
+slabs_partial
+slabs_full
+```
+
+它们分别表示：
+
+```text
+slabs_free:
+inuse == 0
+
+slabs_partial:
+0 < inuse < total
+
+slabs_full:
+inuse == total
+```
+
+分配对象时优先从 `slabs_partial` 中寻找 slab，其次使用 `slabs_free`。
+
+如果两者均没有可用 slab，则调用 `slub_grow()` 从 Buddy 获取新的物理页。
+
+优先使用 partial slab 可以尽量填满已经使用了一部分的页面，减少同时占用大量半空 slab 的情况。
+
+### 7.6 空闲对象管理
+
+空闲对象本身的起始位置被用来保存下一个空闲对象的地址：
+
+```c
+*(void **)obj = next;
+```
+
+从而形成：
+
+```text
+object0
+   ↓
+object1
+   ↓
+object2
+   ↓
+NULL
+```
+
+因为对象处于空闲状态时没有用户数据需要保存，所以可以使用对象自身空间维护 freelist。
+
+对象重新被分配后，这些空间重新交给调用者使用。
+
+### 7.7 kmalloc 分配过程
+
+小对象的主要分配过程为：
+
+```text
+kmalloc(size)
+    ↓
+slub_cache_index(size)
+    ↓
+选择 size cache
+    ↓
+slub_cache_alloc()
+    ↓
+寻找 partial slab
+    ↓
+寻找 free slab
+    ↓
+均不存在
+    ↓
+slub_grow()
+    ↓
+alloc_page()
+    ↓
+Buddy 分配物理页
+```
+
+取得 slab 后，从 `free_object` 链表中取出一个对象，并增加 `inuse`。
+
+如果：
+
+```text
+inuse == total
+```
+
+则 slab 进入 `slabs_full`。
+
+否则进入 `slabs_partial`。
+
+### 7.8 kfree 与 Slab 回收
+
+`kfree()` 首先根据对象虚拟地址定位其所在页面，并通过页首 magic 判断它属于普通 SLUB 小对象还是大对象。
+
+对于普通小对象，释放后重新插入当前 slab 的空闲对象链表：
+
+```text
+inuse--
+```
+
+如果：
+
+```text
+inuse == 0
+```
+
+则该 slab 移入 `slabs_free`。
+
+本实现没有在最后一个对象释放后立即把物理页还给 Buddy，而是暂时缓存空 slab，以便之后同规格对象能够快速复用。
+
+当调用：
+
+```c
+slub_reap();
+```
+
+时，会遍历所有完全空闲的 slab，并通过：
+
+```c
+free_page(page);
+```
+
+将对应物理页重新归还 Buddy。
+
+### 7.9 大对象处理
+
+对于：
+
+```text
+size > 2048
+```
+
+的请求，不使用 SLUB 小对象 cache，而是直接使用连续页分配。
+
+页首通过 `struct slub_large` 保存：
+
+```c
+struct slub_large {
+    uint64_t magic;
+    struct Page *page;
+    size_t requested_size;
+    size_t nr_pages;
+};
+```
+
+这样 `kfree()` 可以判断该对象属于大对象，并获得当初申请的页面数量。
+
+### 7.10 slub_check() 测试
+
+`slub_check()` 首先记录测试前底层 PMM 的空闲页数：
+
+```c
+size_t free_before = nr_free_pages();
+```
+
+随后测试三种典型申请。
+
+第一组：
+
+```c
+void *a = kmalloc(24);
+void *b = kmalloc(24);
+```
+
+检查：
+
+```c
+ksize(a) == 32
+ksize(b) == 32
+```
+
+用于验证 24 字节请求能够正确进入 32-byte cache。
+
+第二组：
+
+```c
+void *c = kmalloc(2000);
+```
+
+检查：
+
+```c
+ksize(c) == 2048
+```
+
+用于验证最大的 SLUB size class。
+
+第三组：
+
+```c
+void *large = kmalloc(3000);
+```
+
+由于 3000 大于 2048，因此走大对象连续页分配路径，并检查：
+
+```c
+ksize(large) == 3000
+```
+
+所有对象释放后执行：
+
+```c
+slub_reap();
+```
+
+最后验证：
+
+```c
+assert(nr_free_pages() == free_before);
+```
+
+确保测试过程中从 Buddy 获取的物理页能够全部正确归还。
+
+### 7.11 实验结果
+
+执行：
+
+```bash
+make qemu
+```
+
+最终实际输出为：
+
+```text
+memory management: buddy_pmm_manager
+PMM physical memory regions from DTB: 1
+Page metadata: 0x0000000080208000 - 0x0000000080347fff
+RAM region 0 candidate: 0x0000000080348000 - 0x0000000087ffffff
+  Usable RAM: 0x0000000080348000 - 0x0000000087ffffff (31928 pages)
+Free physical pages from DTB regions: 31928
+check_alloc_page() succeeded!
+SLUB: initialized size caches 16..2048 bytes
+slub_check() succeeded!
+satp virtual address: 0xffffffffc0206000
+satp physical address: 0x0000000080206000
+```
+
+建议将运行截图保存为：
+
+```text
+report/images/slub_check.png
+```
+
+并在报告中加入：
+
+```markdown
+![SLUB 小对象分配测试结果](images/slub_check.png)
+```
+
+加入 SLUB 后，可分配物理页数由此前的 31929 变为 31928。
+
+该变化不是 SLUB 运行造成的内存泄漏，而是因为新增 `slub.c` 后内核代码体积增加，内核结束地址及 `Page` 描述符数组位置相应后移，使初始化时少一个物理页能够加入 PMM。
+
+同时，`slub_check()` 最终执行：
+
+```c
+assert(nr_free_pages() == free_before);
+```
+
+并成功输出：
+
+```text
+slub_check() succeeded!
+```
+
+说明测试过程中 SLUB 从 Buddy 获取的物理页最终均被正确归还。
+
+### 7.12 与原 Lab2 的兼容性
+
+加入 SLUB 后重新执行：
+
+```bash
+make grade
+```
+
+结果仍为：
+
+```text
+-check page init: OK
+-check best fit: OK
+Total Score: 20/20
+```
+
+说明 SLUB 的加入没有破坏原有 Page Init 和 Best-Fit 自动评分流程。
+
+执行：
+
+```bash
+make gdb
+```
+
+仍能够正常连接：
+
+```text
+Remote debugging using localhost:1234
+0x0000000000001000 in ?? ()
+```
+
+退出 GDB 后执行：
+
+```bash
+pgrep -a qemu-system-riscv64
+```
+
+无输出，说明调试进程能够正确清理。
+
+### 7.13 实验总结
+
+本次实验在 Buddy 物理页分配器之上增加了一个简单的 SLUB 小对象分配层。
+
+Buddy 继续负责完整物理页管理，SLUB 则进一步将物理页划分为固定大小对象。
+
+通过 24 字节、2000 字节和 3000 字节等不同大小的申请，验证了 size class 选择、小对象 slab、大对象连续页分配、对象释放以及空 slab 页面回收等主要路径。
+
+最终 `make qemu` 中 `slub_check()` 成功，原有 `make grade` 仍保持 20/20，`make gdb` 也能够正常工作，说明当前 SLUB 可以与 Buddy、DTB 物理内存初始化和原有 Lab2 框架共同运行。
+
+## 8. 最终集成测试与小组分工
+
+### 8.1 最终集成测试
 
 完成全部必做内容和拓展内容后，对最终版本重新进行了整体回归测试。
 
@@ -2127,21 +2558,21 @@ Total Score: 20/20
 
 \`make gdb\` 能够自动启动 QEMU 并连接 GDB，初始停在 \`0x0000000000001000\`，退出后无残留 QEMU 进程。
 
-### 7.2 拓展内容
+### 8.2 拓展内容
 
 本组在基础实验之外完成了两项拓展工作：
 
 1. **硬件内存范围 Challenge**：扩展 DTB 解析，支持 RAM region、reserved-memory 和 FDT reservation block，并依据实际可用物理内存范围初始化 PMM。
 2. **Sv39 GDB 智能调试流程**：通过 \`tools/sv39/sv39_walk.gdb\` 辅助分析 Sv39 虚拟地址、satp、页表项以及有效和无效地址转换，并结合 QEMU MMU 日志进行验证。
 
-### 7.3 小组分工
+### 8.3 小组分工
 
 | 成员 | 主要工作 |
 |---|---|
-| 成员1 | 物理内存初始化、First-Fit、相关测试与报告整理 |
-| 成员2（学号 2414029） | Best-Fit、GDB / Sv39 / MMU / TLB 调试分析、QEMU 源码级 GDB 调试、Sv39 GDB 智能调试流程 |
-| 成员3 | Buddy System、硬件内存范围 Challenge、最终集成测试与总报告整理 |
+| 贾璐菡 | 物理内存初始化、First-Fit、相关测试与报告整理 |
+| 张馨月 | Best-Fit、GDB / Sv39 / MMU / TLB 调试分析、QEMU 源码级 GDB 调试、Sv39 GDB 智能调试流程 |
+| 李文慧 | Buddy System、硬件内存范围 Challenge、SLUB 小对象分配 Challenge、最终集成测试与总报告整理 |
 
-### 7.4 实验总结
+### 8.4 实验总结
 
 通过本次实验，我们从物理内存探测、Page 描述符初始化开始，逐步理解并实现了不同的物理页分配策略，同时结合 Sv39 页表和 GDB 调试观察了虚拟地址到物理地址的转换过程。Buddy System 和 DTB 内存范围扩展进一步加深了对连续物理页管理、地址空洞以及保留内存处理方式的理解。智能 GDB 调试流程则将原本需要手工计算的 Sv39 地址转换过程进行了工具化，方便后续调试和验证。
