@@ -83,6 +83,38 @@ void print_regs(struct pushregs *gpr) {
 //lab3 function2 YOUR CODE
 
 
+void interrupt_handler(struct trapframe *tf) {
+    // 去掉 scause 的最高位，得到中断原因编号
+    uintptr_t cause = tf->cause & (((uintptr_t)-1) >> 1);
+
+    switch (cause) {
+        case IRQ_S_TIMER:
+            // 设置下一次时钟中断
+            clock_set_next_event();
+
+            // 时钟中断计数加一
+            ticks++;
+
+            // 每累计100次时钟中断打印一次
+            if (ticks % TICK_NUM == 0) {
+                print_ticks();
+            }
+            break;
+
+        case IRQ_S_SOFT:
+            // 处理Supervisor软件中断
+            cprintf("Supervisor software interrupt\n");
+            break;
+
+        default:
+            // 处理其他未知中断
+            cprintf("Unknown interrupt: cause %d\n", (int)cause);
+            break;
+    }
+}
+
+
+
 static inline void trap_dispatch(struct trapframe *tf) {
     if ((intptr_t)tf->cause < 0) {
         // interrupts
