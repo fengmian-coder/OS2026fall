@@ -115,6 +115,35 @@ void interrupt_handler(struct trapframe *tf) {
 
 
 
+/* lab3 function2: exception_handler
+ * 异常处理
+ */
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+
+    case CAUSE_BREAKPOINT:
+        // 处理断点异常
+        cprintf("Breakpoint at 0x%08x\n", tf->epc);
+        // 当前测试使用4字节ebreak指令
+        tf->epc += 4;
+        break;
+
+    case CAUSE_ILLEGAL_INSTRUCTION:
+        // 处理非法指令异常
+        cprintf("Illegal instruction at 0x%08x\n", tf->epc);
+        // 当前测试中的非法指令长度为4字节
+        tf->epc += 4;
+        break;
+
+    default:
+        // 未知异常：输出完整TrapFrame便于调试
+        print_trapframe(tf);
+        break;
+    }
+}
+
+
+
 static inline void trap_dispatch(struct trapframe *tf) {
     if ((intptr_t)tf->cause < 0) {
         // interrupts
