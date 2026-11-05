@@ -8,8 +8,10 @@
 #include <riscv.h>
 #include <stdio.h>
 #include <trap.h>
+#include <sbi.h>
 
 #define TICK_NUM 100
+#define SHUTDOWN_AFTER 10
 
 static void print_ticks() {
     cprintf("%d ticks\n", TICK_NUM);
@@ -80,7 +82,7 @@ void print_regs(struct pushregs *gpr) {
     cprintf("  t6       0x%08x\n", gpr->t6);
 }
 
-//lab3 function2 YOUR CODE
+//lab3 function2 2412074
 
 
 void interrupt_handler(struct trapframe *tf) {
@@ -89,17 +91,23 @@ void interrupt_handler(struct trapframe *tf) {
 
     switch (cause) {
         case IRQ_S_TIMER:
-            // 设置下一次时钟中断
-            clock_set_next_event();
+    // 设置下一次时钟中断
+    clock_set_next_event();
 
-            // 时钟中断计数加一
-            ticks++;
+    // 时钟中断计数加一
+    ticks++;
 
-            // 每累计100次时钟中断打印一次
-            if (ticks % TICK_NUM == 0) {
-                print_ticks();
-            }
-            break;
+    // 每累计100次时钟中断打印一次
+    if (ticks % TICK_NUM == 0) {
+        print_ticks();
+
+        // 累计输出10次后关闭系统
+        if (ticks / TICK_NUM >= SHUTDOWN_AFTER) {
+            cprintf("Timer test finished, shutting down...\n");
+            sbi_shutdown();
+        }
+    }
+    break;
 
         case IRQ_S_SOFT:
             // 处理Supervisor软件中断
@@ -145,12 +153,18 @@ case CAUSE_BREAKPOINT: {
 }
 
 
-    case CAUSE_ILLEGAL_INSTRUCTION:
-        // 处理非法指令异常
-        cprintf("Illegal instruction at 0x%08x\n", tf->epc);
-        // 当前测试中的非法指令长度为4字节
+    case CAUSE_ILLEGAL_INSTRUCTION: {
+    cprintf("Illegal instruction at 0x%08x\n", tf->epc);
+
+    uint16_t insn = *(const uint16_t *)(uintptr_t)tf->epc;
+
+    if ((insn & 0x3) == 0x3) {
         tf->epc += 4;
-        break;
+    } else {
+        tf->epc += 2;
+    }
+    break;
+}
 
     default:
         // 未知异常：输出完整TrapFrame便于调试
