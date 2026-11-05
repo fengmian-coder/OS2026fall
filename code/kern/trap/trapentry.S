@@ -56,6 +56,8 @@
 
     .macro RESTORE_ALL
 
+    #lab3 function1 2414029
+
     # Restore sstatus and sepc
     LOAD t0, 32*REGBYTES(sp)
     csrw sstatus, t0
@@ -104,6 +106,8 @@
     .align(2)
 __alltraps:
     SAVE_ALL
+
+    #lab3 function1 2414029
 
     # Pass the trapframe pointer to the C function
     mv a0, sp
