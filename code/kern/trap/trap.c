@@ -126,12 +126,24 @@ void interrupt_handler(struct trapframe *tf) {
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
 
-    case CAUSE_BREAKPOINT:
-        // 处理断点异常
-        cprintf("Breakpoint at 0x%08x\n", tf->epc);
-        // 当前测试使用4字节ebreak指令
+
+case CAUSE_BREAKPOINT: {
+    // 输出断点异常发生的位置
+    cprintf("Breakpoint at 0x%08x\n", tf->epc);
+
+    // 读取断点指令的低16位
+    uint16_t insn = *(const uint16_t *)(uintptr_t)tf->epc;
+
+    // 根据指令长度更新异常返回地址
+    // 压缩指令为2字节，普通指令为4字节
+    if ((insn & 0x3) == 0x3) {
         tf->epc += 4;
-        break;
+    } else {
+        tf->epc += 2;
+    }
+    break;
+}
+
 
     case CAUSE_ILLEGAL_INSTRUCTION:
         // 处理非法指令异常
