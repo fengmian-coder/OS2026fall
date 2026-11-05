@@ -82,7 +82,71 @@ size_t nr_free_pages(void) {
 }
 
 //lab2 请补充你在lab2中的代码
+/* Initialize physical page descriptors and free memory */
+static void page_init(void) {
+    // Get physical memory information from DTB
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
 
+    // Check physical memory information
+    assert(mem_base == DRAM_BASE);
+    assert(mem_size > 0);
+
+    // Calculate the maximum supported memory size
+    uint64_t max_mem_size =
+        (KERNBASE - PHYSICAL_MEMORY_OFFSET - DRAM_BASE) + KMEMSIZE;
+
+    assert(mem_size <= max_mem_size);
+
+    // Initialize virtual-to-physical address offset
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    // Calculate total physical pages
+    npage = (mem_base + mem_size) / PGSIZE;
+
+    // Get the end address of the kernel image
+    extern char end[];
+
+    // Initialize the Page descriptor array
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+
+    size_t page_count = npage - nbase;
+
+    uintptr_t freemem = ROUNDUP(
+        (uintptr_t)pages + page_count * sizeof(struct Page),
+        PGSIZE
+    );
+
+    // Mark all pages as reserved initially
+    for (size_t i = 0; i < page_count; i++) {
+        struct Page *p = &pages[i];
+
+        p->flags = 0;
+        p->property = 0;
+        set_page_ref(p, 0);
+        SetPageReserved(p);
+    }
+
+    // Calculate available physical memory range
+    uintptr_t free_start_pa = PADDR(freemem);
+    uintptr_t mem_end_pa = mem_base + mem_size;
+
+    assert(free_start_pa >= mem_base);
+    assert(free_start_pa < mem_end_pa);
+
+    uintptr_t free_end_pa = ROUNDDOWN(mem_end_pa, PGSIZE);
+
+    assert(free_start_pa < free_end_pa);
+
+    size_t nfree = (free_end_pa - free_start_pa) / PGSIZE;
+
+    // Initialize free physical memory pages
+    init_memmap(pa2page(free_start_pa), nfree);
+
+    cprintf("Free physical pages: %lu\n", nfree);
+    cprintf("Memory base: 0x%016lx\n", mem_base);
+    cprintf("Memory size: 0x%016lx\n", mem_size);
+}
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
     // We need to alloc/free the physical memory (granularity is 4KB or other size).
