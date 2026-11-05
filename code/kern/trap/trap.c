@@ -114,7 +114,7 @@ void interrupt_handler(struct trapframe *tf) {
             cprintf("Supervisor software interrupt\n");
             break;
 
-       
+
         default:
              // 未知中断：输出原因编号
              cprintf("Unknown interrupt: cause %d\n", (int)cause);
