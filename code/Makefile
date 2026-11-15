@@ -1,4 +1,4 @@
-PROJ	:= lab3
+PROJ	:= lab4
 EMPTY	:=
 SPACE	:= $(EMPTY) $(EMPTY)
 SLASH	:= /
@@ -96,18 +96,23 @@ $(call add_files_cc,$(call listf_cc,$(LIBDIR)),libs,)
 # -------------------------------------------------------------------
 # kernel
 
-KINCLUDE	+= kern/debug/ \
-			   kern/driver/ \
-			   kern/trap/ \
-			   kern/mm/ \
-			   kern/arch/
+KINCLUDE                = kern/driver/ \
+                          kern/trap/ \
+                          kern/mm/ \
+                          kern/sync/ \
+                          kern/fs/ \
+                          kern/process \
+                          kern/schedule
 
-KSRCDIR		+= kern/init \
-			   kern/libs \
-			   kern/debug \
-			   kern/driver \
-			   kern/trap \
-			   kern/mm
+KSRCDIR                 += kern/init \
+                           kern/libs \
+                           kern/debug \
+                           kern/driver \
+                           kern/trap \
+                           kern/mm \
+                           kern/fs \
+                           kern/process \
+                           kern/schedule
 
 KCFLAGS		+= $(addprefix -I,$(KINCLUDE))
 
@@ -167,7 +172,7 @@ qemu: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 		-machine virt \
 		-nographic \
 		-bios default \
-		-kernel $(UCOREIMG)
+		-device loader,file=$(UCOREIMG),addr=0x80200000
 
 debug: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 	$(V)$(QEMU) \
@@ -202,7 +207,7 @@ TOUCH_FILES		:= kern/trap/trap.c
 
 MAKEOPTS		:= --quiet --no-print-directory
 
-GRADE_TMP	:= /tmp/lab3_grade
+GRADE_TMP	:= /tmp/lab4_grade
 
 grade:
 	$(V)$(MAKE) $(MAKEOPTS) clean

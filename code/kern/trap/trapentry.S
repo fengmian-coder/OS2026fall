@@ -122,3 +122,9 @@ __trapret:
     RESTORE_ALL
     # return from supervisor call
     sret
+
+    .globl forkrets
+forkrets:
+    # Set stack to the new process's trapframe
+    mv sp, a0
+    j __trapret
