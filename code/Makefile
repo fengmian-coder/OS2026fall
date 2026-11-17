@@ -97,6 +97,7 @@ $(call add_files_cc,$(call listf_cc,$(LIBDIR)),libs,)
 # kernel
 
 KINCLUDE                = kern/driver/ \
+						  kern/debug/ \
                           kern/trap/ \
                           kern/mm/ \
                           kern/sync/ \
