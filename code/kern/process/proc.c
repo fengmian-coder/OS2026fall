@@ -218,7 +218,192 @@ init_main(void *arg)
     return 0;
 }
 
-//LAB4 function2 YOUR CODE
+//LAB4 function2 2412074
 
+// Allocate and initialize a process control block.
+static struct proc_struct *
+alloc_proc(void)
+{
+    struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
+    if (proc == NULL) {
+        return NULL;
+    }
+
+    memset(proc, 0, sizeof(struct proc_struct));
+
+    proc->state = PROC_UNINIT;
+    proc->pid = -1;
+    proc->runs = 0;
+    proc->kstack = 0;
+    proc->need_resched = 0;
+    proc->parent = NULL;
+    proc->mm = NULL;
+    proc->tf = NULL;
+    proc->pgdir = 0;
+    proc->flags = 0;
+
+    list_init(&(proc->list_link));
+    list_init(&(proc->hash_link));
+
+    return proc;
+}
+
+
+
+
+// Initialize process management and create the first kernel thread.
+void
+proc_init(void)
+{
+    int i;
+    list_init(&proc_list);
+    for (i = 0; i < HASH_LIST_SIZE; i++) {
+        list_init(&hash_list[i]);
+    }
+
+    // The idle process uses the existing boot kernel stack.
+    if ((idleproc = alloc_proc()) == NULL) {
+        panic("cannot alloc idleproc.\n");
+    }
+
+    idleproc->pid = 0;
+    idleproc->state = PROC_RUNNABLE;
+    idleproc->kstack = (uintptr_t)bootstack;
+    idleproc->need_resched = 1;
+    idleproc->pgdir = boot_pgdir_pa;
+
+    nr_process = 1;
+    current = idleproc;
+
+    set_proc_name(idleproc, "idle");
+
+    // Create the first ordinary kernel thread.
+    int pid = kernel_thread(init_main, "Hello world!!", 0);
+    if (pid <= 0) {
+        panic("cannot create initproc.\n");
+    }
+
+    initproc = find_proc(pid);
+    assert(initproc != NULL && initproc->pid == 1);
+
+    set_proc_name(initproc, "init");
+    assert(nr_process == 2);
+}
+
+
+// Create a kernel thread with the specified entry function and argument.
+int
+kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags)
+{
+    struct trapframe tf;
+    memset(&tf, 0, sizeof(struct trapframe));
+
+    tf.gpr.s0 = (uintptr_t)fn;
+    tf.gpr.s1 = (uintptr_t)arg;
+    tf.epc = (uintptr_t)kernel_thread_entry;
+
+    // Return to supervisor mode with interrupts enabled.
+    tf.status = read_csr(sstatus);
+    tf.status |= SSTATUS_SPP | SSTATUS_SPIE;
+    tf.status &= ~SSTATUS_SIE;
+
+    return do_fork(clone_flags | CLONE_VM, 0, &tf);
+}
+
+
+// Set up the address space for a kernel thread.
+static int
+copy_mm(uint32_t clone_flags, struct proc_struct *proc)
+{
+    // User address-space copying is not required in Lab4.
+    assert(current->mm == NULL);
+
+    proc->mm = NULL;
+    proc->pgdir = boot_pgdir_pa;
+
+    return 0;
+}
+
+
+// Prepare the initial trapframe and context of a new thread.
+static void
+copy_thread(struct proc_struct *proc, uintptr_t esp,
+            struct trapframe *tf)
+{
+    // Place the trapframe at the top of the new kernel stack.
+    proc->tf = (struct trapframe *)
+        (proc->kstack + KSTACKSIZE - sizeof(struct trapframe));
+
+    *(proc->tf) = *tf;
+
+    // A child process initially returns zero from fork.
+    proc->tf->gpr.a0 = 0;
+
+    // Kernel threads need a valid stack after trapframe restoration.
+    proc->tf->gpr.sp = (esp != 0) ? esp :
+        (proc->kstack + KSTACKSIZE);
+
+    // The first context switch enters forkret.
+    proc->context.ra = (uintptr_t)forkret;
+    proc->context.sp = (uintptr_t)(proc->tf);
+}
+
+
+// Create a new kernel thread and register it in the process system.
+int
+do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
+{
+    int ret = -E_NO_FREE_PROC;
+    struct proc_struct *proc;
+
+    if (nr_process >= MAX_PROCESS) {
+        return ret;
+    }
+
+    ret = -E_NO_MEM;
+
+    // Allocate and initialize a PCB.
+    if ((proc = alloc_proc()) == NULL) {
+        return ret;
+    }
+
+    proc->parent = current;
+
+    // Allocate the kernel stack.
+    if (setup_kstack(proc) != 0) {
+        goto bad_fork_cleanup_proc;
+    }
+
+    // Set up the memory management information.
+    if (copy_mm(clone_flags, proc) != 0) {
+        goto bad_fork_cleanup_kstack;
+    }
+
+    // Prepare the first execution context.
+    copy_thread(proc, stack, tf);
+
+    // Protect PID allocation and process-list updates.
+    bool intr_flag;
+    local_intr_save(intr_flag);
+
+    proc->pid = get_pid();
+    hash_proc(proc);
+    list_add(&proc_list, &(proc->list_link));
+    nr_process++;
+
+    // Make the new thread runnable before leaving the critical section.
+    wakeup_proc(proc);
+
+    local_intr_restore(intr_flag);
+
+    return proc->pid;
+
+bad_fork_cleanup_kstack:
+    put_kstack(proc);
+
+bad_fork_cleanup_proc:
+    kfree(proc);
+    return ret;
+}
 
 //LAB4 function3 YOUR CODE
