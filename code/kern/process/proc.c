@@ -406,4 +406,51 @@ bad_fork_cleanup_proc:
     return ret;
 }
 
-//LAB4 function3 YOUR CODE
+// LAB4 function3 2411785
+// Member C: 李文慧
+
+// Switch to the specified process.
+void
+proc_run(struct proc_struct *proc)
+{
+    if (proc != current) {
+        bool intr_flag;
+        struct proc_struct *prev = current;
+
+        // Disable interrupts before switching.
+        local_intr_save(intr_flag);
+
+        {
+            // Update the current process.
+            current = proc;
+
+            // Switch to the page table of the new process.
+            write_csr(satp,
+                0x8000000000000000 |
+                (proc->pgdir >> RISCV_PGSHIFT));
+
+            // Flush the TLB after changing the page table.
+            flush_tlb();
+
+            // Switch CPU execution contexts.
+            switch_to(&(prev->context), &(proc->context));
+        }
+
+        // Restore the previous interrupt state.
+        local_intr_restore(intr_flag);
+    }
+}
+
+// LAB4 function3 2411785
+// Member C: 李文慧
+// Idle process loop.
+
+void
+cpu_idle(void)
+{
+    while (1) {
+        if (current->need_resched) {
+            schedule();
+        }
+    }
+}
