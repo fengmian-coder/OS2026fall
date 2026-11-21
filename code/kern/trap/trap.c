@@ -8,10 +8,9 @@
 #include <riscv.h>
 #include <stdio.h>
 #include <trap.h>
-#include <sbi.h>
+#include <proc.h>
 
 #define TICK_NUM 100
-#define SHUTDOWN_AFTER 10
 
 static void print_ticks() {
     cprintf("%d ticks\n", TICK_NUM);
@@ -31,6 +30,8 @@ void idt_init(void) {
     write_csr(sscratch, 0);
     /* Set the exception vector address */
     write_csr(stvec, &__alltraps);
+    /* Allow supervisor-mode access to user pages when required by VMM. */
+    set_csr(sstatus, SSTATUS_PUM);
 }
 
 /* trap_in_kernel - test if trap happened in kernel */
@@ -91,23 +92,19 @@ void interrupt_handler(struct trapframe *tf) {
 
     switch (cause) {
         case IRQ_S_TIMER:
-    // 设置下一次时钟中断
-    clock_set_next_event();
+            // Re-arm the timer before returning from the interrupt.
+            clock_set_next_event();
+            ticks++;
 
-    // 时钟中断计数加一
-    ticks++;
+            // Let the idle loop/scheduler know that a reschedule is needed.
+            if (current != NULL) {
+                current->need_resched = 1;
+            }
 
-    // 每累计100次时钟中断打印一次
-    if (ticks % TICK_NUM == 0) {
-        print_ticks();
-
-        // 累计输出10次后关闭系统
-        if (ticks / TICK_NUM >= SHUTDOWN_AFTER) {
-            cprintf("Timer test finished, shutting down...\n");
-            sbi_shutdown();
-        }
-    }
-    break;
+            if (ticks % TICK_NUM == 0) {
+                print_ticks();
+            }
+            break;
 
         case IRQ_S_SOFT:
             // 处理Supervisor软件中断

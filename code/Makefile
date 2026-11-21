@@ -5,9 +5,9 @@ SLASH	:= /
 
 V       := @
 
-#ifndef GCCPREFIX
+ifndef GCCPREFIX
 GCCPREFIX := riscv64-unknown-elf-
-#endif
+endif
 
 ifndef QEMU
 QEMU := qemu-system-riscv64
@@ -96,7 +96,7 @@ $(call add_files_cc,$(call listf_cc,$(LIBDIR)),libs,)
 # -------------------------------------------------------------------
 # kernel
 
-KINCLUDE                = kern/driver/ \
+KINCLUDE                += kern/driver/ \
 						  kern/debug/ \
                           kern/trap/ \
                           kern/mm/ \
@@ -173,7 +173,7 @@ qemu: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 		-machine virt \
 		-nographic \
 		-bios default \
-		-device loader,file=$(UCOREIMG),addr=0x80200000
+		-kernel $(UCOREIMG)
 
 debug: $(UCOREIMG) $(SWAPIMG) $(SFSIMG)
 	$(V)$(QEMU) \
