@@ -32,12 +32,12 @@ static uint64_t timebase = 100000;
  * and then enable IRQ_TIMER.
  * */
 void clock_init(void) {
-    // enable timer interrupt in sie
-    set_csr(sie, MIP_STIP);
     // divided by 500 when using Spike(2MHz)
     // divided by 100 when using QEMU(10MHz)
     // timebase = sbi_timebase() / 500;
     clock_set_next_event();
+    // Enable the supervisor timer interrupt after the first deadline is set.
+    set_csr(sie, MIP_STIP);
 
     // initialize time counter 'ticks' to zero
     ticks = 0;

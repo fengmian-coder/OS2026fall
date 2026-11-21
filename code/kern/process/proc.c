@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <riscv.h>
 
 /* ------------- process/thread mechanism design&implementation -------------
 (an simplified Linux process/thread mechanism )
@@ -424,13 +425,14 @@ proc_run(struct proc_struct *proc)
             // Update the current process.
             current = proc;
 
-            // Switch to the page table of the new process.
-            write_csr(satp,
-                0x8000000000000000 |
-                (proc->pgdir >> RISCV_PGSHIFT));
-
-            // Flush the TLB after changing the page table.
-            flush_tlb();
+            // All Lab4 kernel threads share one page directory. Only switch SATP
+            // and flush the TLB if a future process uses a different page table.
+            if (prev->pgdir != proc->pgdir) {
+                write_csr(satp,
+                    0x8000000000000000 |
+                    (proc->pgdir >> RISCV_PGSHIFT));
+                asm volatile("sfence.vma" ::: "memory");
+            }
 
             // Switch CPU execution contexts.
             switch_to(&(prev->context), &(proc->context));
