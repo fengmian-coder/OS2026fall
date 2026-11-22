@@ -452,15 +452,26 @@ static void check_pgdir(void)
 static void check_boot_pgdir(void)
 {
     size_t nr_free_store;
-    pte_t *ptep;
-    int i;
+    uintptr_t pa;
 
     nr_free_store = nr_free_pages();
 
-    for (i = ROUNDDOWN(KERNBASE, PGSIZE); i < npage * PGSIZE; i += PGSIZE)
+    // Check the initial Sv39 1GiB leaf mapping.
+    // Physical memory is mapped into the high kernel address space.
+    for (pa = DRAM_BASE; pa < npage * PGSIZE; pa += PGSIZE)
     {
-        assert((ptep = get_pte(boot_pgdir_va, (uintptr_t)KADDR(i), 0)) != NULL);
-        assert(PTE_ADDR(*ptep) == i);
+        uintptr_t va = (uintptr_t)KADDR(pa);
+        pde_t pde = boot_pgdir_va[PDX1(va)];
+
+        // Check that the root entry is a valid readable,
+        // writable and executable leaf entry.
+        assert((pde & (PTE_V | PTE_R | PTE_W | PTE_X)) ==
+               (PTE_V | PTE_R | PTE_W | PTE_X));
+
+        // A 1GiB leaf maps the base physical address plus
+        // the lower 30 bits of the virtual address.
+        assert(PTE_ADDR(pde) +
+               (va & ((1UL << PDX1SHIFT) - 1)) == pa);
     }
 
     assert(boot_pgdir_va[0] == 0);
