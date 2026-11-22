@@ -13,6 +13,13 @@
 #include <riscv.h>
 #include <dtb.h>
 
+// #define LAB4_TEST_OOM
+
+#ifdef LAB4_TEST_OOM
+static int lab4_fail_after_alloc = 0;
+static void check_pte_oom_rollback(void);
+#endif
+
 // virtual address of physical page array
 struct Page *pages;
 // amount of physical memory (in pages)
@@ -52,6 +59,15 @@ static void init_memmap(struct Page *base, size_t n)
 // memory
 struct Page *alloc_pages(size_t n)
 {
+    #ifdef LAB4_TEST_OOM
+    if (lab4_fail_after_alloc > 0 &&
+        --lab4_fail_after_alloc == 0)
+    {
+        cprintf("[OOM] injected allocation failure\n");
+        return NULL;
+    }
+#endif
+
     struct Page *page = NULL;
     bool intr_flag;
     local_intr_save(intr_flag);
@@ -229,6 +245,10 @@ void pmm_init(void)
     // check the correctness of the basic virtual memory map.
     check_boot_pgdir();
 
+    #ifdef LAB4_TEST_OOM
+       check_pte_oom_rollback();
+    #endif
+
     kmalloc_init();
 }
 
@@ -241,7 +261,11 @@ void pmm_init(void)
 // return vaule: the kernel virtual address of this pte
 pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create)
 {
+    // Record the first-level page-table page allocated by this call.
+    struct Page *new_pdep1_page = NULL;
+
     pde_t *pdep1 = &pgdir[PDX1(la)];
+
     if (!(*pdep1 & PTE_V))
     {
         struct Page *page;
@@ -249,24 +273,42 @@ pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create)
         {
             return NULL;
         }
+
         set_page_ref(page, 1);
         uintptr_t pa = page2pa(page);
         memset(KADDR(pa), 0, PGSIZE);
         *pdep1 = ptd_create(page2ppn(page));
+
+        new_pdep1_page = page;
     }
-    pde_t *pdep0 = &((pte_t *)KADDR(PDE_ADDR(*pdep1)))[PDX0(la)];
+
+    pde_t *pdep0 =
+        &((pte_t *)KADDR(PDE_ADDR(*pdep1)))[PDX0(la)];
+
     if (!(*pdep0 & PTE_V))
     {
         struct Page *page;
         if (!create || (page = alloc_page()) == NULL)
         {
+            // Roll back the newly allocated first-level table.
+            // Never free a page table that existed before this call.
+            if (new_pdep1_page != NULL)
+            {
+                *pdep1 = 0;
+                set_page_ref(new_pdep1_page, 0);
+                free_page(new_pdep1_page);
+                tlb_invalidate(pgdir, la);
+            }
+
             return NULL;
         }
+
         set_page_ref(page, 1);
         uintptr_t pa = page2pa(page);
         memset(KADDR(pa), 0, PGSIZE);
         *pdep0 = ptd_create(page2ppn(page));
     }
+
     return &((pte_t *)KADDR(PDE_ADDR(*pdep0)))[PTX(la)];
 }
 
@@ -285,7 +327,7 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
     return NULL;
 }
 
-//LAB4 function1 YOUR CODE
+//LAB4 function1 2414029
 
 /* page_remove_pte - remove a mapping from a page table */
 static void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
@@ -367,7 +409,60 @@ void page_remove(pde_t *pgdir, uintptr_t la)
 }
 
 
+#ifdef LAB4_TEST_OOM
 
+static void check_pte_oom_rollback(void)
+{
+    struct Page *root = alloc_page();
+    struct Page *data = alloc_page();
+
+    assert(root != NULL && data != NULL);
+
+    pde_t *test_pgdir = (pde_t *)page2kva(root);
+    memset(test_pgdir, 0, PGSIZE);
+
+    size_t before = nr_free_pages();
+
+    // First page-table allocation succeeds.
+    // Second page-table allocation fails.
+    lab4_fail_after_alloc = 2;
+
+    int ret = page_insert(
+        test_pgdir, data, 0x4000, PTE_R | PTE_W
+    );
+
+    size_t after = nr_free_pages();
+
+    cprintf(
+        "[Test PTE OOM] ret=%d, root=0x%lx, before=%lu, after=%lu\n",
+        ret,
+        (uintptr_t)test_pgdir[PDX1(0x4000)],
+        before,
+        after
+    );
+
+    // The injected failure must have been triggered.
+    assert(lab4_fail_after_alloc == 0);
+
+    // page_insert must report allocation failure.
+    assert(ret == -E_NO_MEM);
+
+    // Newly created root entry must be removed.
+    assert(test_pgdir[PDX1(0x4000)] == 0);
+
+    // Failed insertion must not add a data-page reference.
+    assert(page_ref(data) == 0);
+
+    // No page-table pages may leak.
+    assert(before == after);
+
+    free_page(data);
+    free_page(root);
+
+    cprintf("[Test PTE Rollback] PASS\n");
+}
+
+#endif
 
 
 
