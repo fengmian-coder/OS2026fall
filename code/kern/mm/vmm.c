@@ -74,6 +74,8 @@ mm_create(void)
         mm->pgdir = NULL;
         mm->map_count = 0;
         mm->sm_priv = NULL;
+        set_mm_count(mm, 0);
+        lock_init(&mm->mm_lock);
     }
     return mm;
 }
@@ -186,6 +188,80 @@ void mm_destroy(struct mm_struct *mm)
     mm = NULL;
 }
 
+int mm_map(struct mm_struct *mm, uintptr_t addr, size_t len, uint32_t vm_flags,
+           struct vma_struct **vma_store)
+{
+    uintptr_t start = ROUNDDOWN(addr, PGSIZE), end = ROUNDUP(addr + len, PGSIZE);
+    if (!USER_ACCESS(start, end))
+    {
+        return -E_INVAL;
+    }
+
+    assert(mm != NULL);
+
+    int ret = -E_INVAL;
+
+    struct vma_struct *vma;
+    if ((vma = find_vma(mm, start)) != NULL && end > vma->vm_start)
+    {
+        goto out;
+    }
+    ret = -E_NO_MEM;
+
+    if ((vma = vma_create(start, end, vm_flags)) == NULL)
+    {
+        goto out;
+    }
+    insert_vma_struct(mm, vma);
+    if (vma_store != NULL)
+    {
+        *vma_store = vma;
+    }
+    ret = 0;
+
+out:
+    return ret;
+}
+
+// lab5 function3 YOUR CODE: dup_mmap
+
+void exit_mmap(struct mm_struct *mm)
+{
+    assert(mm != NULL && mm_count(mm) == 0);
+    pde_t *pgdir = mm->pgdir;
+    list_entry_t *list = &(mm->mmap_list), *le = list;
+    while ((le = list_next(le)) != list)
+    {
+        struct vma_struct *vma = le2vma(le, list_link);
+        unmap_range(pgdir, vma->vm_start, vma->vm_end);
+    }
+    while ((le = list_next(le)) != list)
+    {
+        struct vma_struct *vma = le2vma(le, list_link);
+        exit_range(pgdir, vma->vm_start, vma->vm_end);
+    }
+}
+
+bool copy_from_user(struct mm_struct *mm, void *dst, const void *src, size_t len, bool writable)
+{
+    if (!user_mem_check(mm, (uintptr_t)src, len, writable))
+    {
+        return 0;
+    }
+    memcpy(dst, src, len);
+    return 1;
+}
+
+bool copy_to_user(struct mm_struct *mm, void *dst, const void *src, size_t len)
+{
+    if (!user_mem_check(mm, (uintptr_t)dst, len, 1))
+    {
+        return 0;
+    }
+    memcpy(dst, src, len);
+    return 1;
+}
+
 // vmm_init - initialize virtual memory management
 //          - now just call check_vmm to check correctness of vmm
 void vmm_init(void)
@@ -266,4 +342,38 @@ check_vma_struct(void)
     mm_destroy(mm);
 
     cprintf("check_vma_struct() succeeded!\n");
+}
+
+bool user_mem_check(struct mm_struct *mm, uintptr_t addr, size_t len, bool write)
+{
+    if (mm != NULL)
+    {
+        if (!USER_ACCESS(addr, addr + len))
+        {
+            return 0;
+        }
+        struct vma_struct *vma;
+        uintptr_t start = addr, end = addr + len;
+        while (start < end)
+        {
+            if ((vma = find_vma(mm, start)) == NULL || start < vma->vm_start)
+            {
+                return 0;
+            }
+            if (!(vma->vm_flags & ((write) ? VM_WRITE : VM_READ)))
+            {
+                return 0;
+            }
+            if (write && (vma->vm_flags & VM_STACK))
+            {
+                if (start < vma->vm_start + PGSIZE)
+                { // check stack start & size
+                    return 0;
+                }
+            }
+            start = vma->vm_end;
+        }
+        return 1;
+    }
+    return KERN_ACCESS(addr, addr + len);
 }

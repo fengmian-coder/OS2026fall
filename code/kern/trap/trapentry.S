@@ -54,6 +54,7 @@
     STORE s4, 35*REGBYTES(sp)
     .endm
 
+    # Lab5: extend stack selection and restoration for U-mode traps.
     .macro RESTORE_ALL
 
     #lab3 function1 2414029

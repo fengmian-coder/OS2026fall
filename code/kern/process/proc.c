@@ -99,6 +99,40 @@ get_proc_name(struct proc_struct *proc)
     return memcpy(name, proc->name, PROC_NAME_LEN);
 }
 
+// set_links - set the relation links of process
+static void
+set_links(struct proc_struct *proc)
+{
+    list_add(&proc_list, &(proc->list_link));
+    proc->yptr = NULL;
+    if ((proc->optr = proc->parent->cptr) != NULL)
+    {
+        proc->optr->yptr = proc;
+    }
+    proc->parent->cptr = proc;
+    nr_process++;
+}
+
+// remove_links - clean the relation links of process
+static void
+remove_links(struct proc_struct *proc)
+{
+    list_del(&(proc->list_link));
+    if (proc->optr != NULL)
+    {
+        proc->optr->yptr = proc->yptr;
+    }
+    if (proc->yptr != NULL)
+    {
+        proc->yptr->optr = proc->optr;
+    }
+    else
+    {
+        proc->parent->cptr = proc->optr;
+    }
+    nr_process--;
+}
+
 // get_pid - alloc a unique pid for process
 static int
 get_pid(void)
@@ -159,6 +193,13 @@ hash_proc(struct proc_struct *proc)
     list_add(hash_list + pid_hashfn(proc->pid), &(proc->hash_link));
 }
 
+// unhash_proc - delete proc from proc hash_list
+static void
+unhash_proc(struct proc_struct *proc)
+{
+    list_del(&(proc->hash_link));
+}
+
 // find_proc - find proc frome proc hash_list according to pid
 struct proc_struct *
 find_proc(int pid)
@@ -210,6 +251,29 @@ int do_exit(int error_code)
 }
 
 // init_main - the second kernel thread used to create user_main kernel threads
+#define __KERNEL_EXECVE(name, binary, size) ({           \
+    cprintf("kernel_execve: pid = %d, name = \"%s\".\n", \
+            current->pid, name);                         \
+    kernel_execve(name, binary, (size_t)(size));         \
+})
+
+#define KERNEL_EXECVE(x) ({                                    \
+    extern unsigned char _binary_obj___user_##x##_out_start[], \
+        _binary_obj___user_##x##_out_size[];                   \
+    __KERNEL_EXECVE(#x, _binary_obj___user_##x##_out_start,    \
+                    _binary_obj___user_##x##_out_size);        \
+})
+
+#define __KERNEL_EXECVE2(x, xstart, xsize) ({   \
+    extern unsigned char xstart[], xsize[];     \
+    __KERNEL_EXECVE(#x, xstart, (size_t)xsize); \
+})
+
+#define KERNEL_EXECVE2(x, xstart, xsize) __KERNEL_EXECVE2(x, xstart, xsize)
+
+// lab5 function2 YOUR CODE: init_main, user_main, kernel_execve, do_execve, load_icode, do_wait.
+// lab5 function4 YOUR CODE: do_exit, do_yield, do_kill.
+
 static int
 init_main(void *arg)
 {
@@ -312,6 +376,30 @@ kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags)
 }
 
 
+// setup_pgdir - alloc one page as PDT
+static int
+setup_pgdir(struct mm_struct *mm)
+{
+    struct Page *page;
+    if ((page = alloc_page()) == NULL)
+    {
+        return -E_NO_MEM;
+    }
+    pde_t *pgdir = page2kva(page);
+    memcpy(pgdir, boot_pgdir_va, PGSIZE);
+
+    mm->pgdir = pgdir;
+    return 0;
+}
+
+// put_pgdir - free the memory space of PDT
+static void
+put_pgdir(struct mm_struct *mm)
+{
+    free_page(kva2page(mm->pgdir));
+}
+
+// lab5 function3 YOUR CODE: extend copy_mm and do_fork for user processes.
 // Set up the address space for a kernel thread.
 static int
 copy_mm(uint32_t clone_flags, struct proc_struct *proc)

@@ -1,2 +1,11 @@
 /code/bin/
 /code/obj/
+/lab5_materials/
+/code/.gdb.in
+/code/.qemu.out
+/code/cscope*
+/code/tags
+/code/projlab*-handin.tar.gz
+__pycache__/
+*.pyc
+*.tmp

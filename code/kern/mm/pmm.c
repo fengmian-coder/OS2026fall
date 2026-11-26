@@ -364,10 +364,10 @@ int page_insert(pde_t *pgdir, struct Page *page,
     if (ptep == NULL)
     {
         return -E_NO_MEM;
-    }
-
+    }        //获取页表项；get_pte() 帮我们找到 la 对应的页表项地址；第三个参数 1 表示：如果缺少中间页表，允许申请新的页表页
+          
     // Increase the reference count of the physical page
-    page_ref_inc(page);
+    page_ref_inc(page);  //ref 表示该物理页被多少个有效映射引用
 
     // Check whether the virtual address already has a mapping
     if (*ptep & PTE_V)
@@ -385,7 +385,7 @@ int page_insert(pde_t *pgdir, struct Page *page,
             // Remove the old mapping
             page_remove_pte(pgdir, la, ptep);
         }
-    }
+    }   //检查原地址有没有映射：如果原来映射的就是同一个物理页，只更新映射信息，不能让引用计数重复增加，所以用 page_ref_dec() 抵消刚才的加一；如果原来映射的是另一个物理页，就调用 page_remove_pte() 删除旧映射，让旧物理页引用计数减一，必要时释放
 
     // Create the new page table entry
     *ptep = pte_create(page2ppn(page), PTE_V | perm);
@@ -393,7 +393,7 @@ int page_insert(pde_t *pgdir, struct Page *page,
     // Invalidate the corresponding TLB entry
     tlb_invalidate(pgdir, la);
 
-    return 0;
+    return 0;    //写入新的页表项，第一行真正建立映射，第二行使旧的 TLB 地址翻译缓存失效，最后返回成功
 }
 
 /* page_remove - remove the mapping at the specified linear address */
@@ -467,6 +467,91 @@ static void check_pte_oom_rollback(void)
 
 
 
+void unmap_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
+{
+    assert(start % PGSIZE == 0 && end % PGSIZE == 0);
+    assert(USER_ACCESS(start, end));
+
+    do
+    {
+        pte_t *ptep = get_pte(pgdir, start, 0);
+        if (ptep == NULL)
+        {
+            start = ROUNDDOWN(start + PTSIZE, PTSIZE);
+            continue;
+        }
+        if (*ptep != 0)
+        {
+            page_remove_pte(pgdir, start, ptep);
+        }
+        start += PGSIZE;
+    } while (start != 0 && start < end);
+}
+
+void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
+{
+    assert(start % PGSIZE == 0 && end % PGSIZE == 0);
+    assert(USER_ACCESS(start, end));
+
+    uintptr_t d1start, d0start;
+    int free_pt;
+    pde_t *pd0, *pt, pde1, pde0;
+    d1start = ROUNDDOWN(start, PDSIZE);
+    d0start = ROUNDDOWN(start, PTSIZE);
+    do
+    {
+        // level 1 page directory entry
+        pde1 = pgdir[PDX1(d1start)];
+        // if there is a valid entry, get into level 0
+        // and try to free all page tables pointed to by
+        // all valid entries in level 0 page directory,
+        // then try to free this level 0 page directory
+        // and update level 1 entry
+        if (pde1 & PTE_V)
+        {
+            pd0 = page2kva(pde2page(pde1));
+            // try to free all page tables
+            do
+            {
+                pde0 = pd0[PDX0(d0start)];
+                if (pde0 & PTE_V)
+                {
+                    pt = page2kva(pde2page(pde0));
+                    // try to free page table
+                    free_pt = 1;
+                    for (int i = 0; i < NPTEENTRY; i++)
+                        if (pt[i] & PTE_V)
+                        {
+                            free_pt = 0;
+                            break;
+                        }
+                    // free it only when all entry are already invalid
+                    if (free_pt)
+                    {
+                        free_page(pde2page(pde0));
+                        pd0[PDX0(d0start)] = 0;
+                    }
+                }
+                d0start += PTSIZE;
+            } while (d0start != 0 && d0start < d1start + PDSIZE && d0start < end);
+            // free level 0 page directory only when all pde0s in it are already invalid
+            size_t i;
+            for (i = 0; i < NPDEENTRY && !(pd0[i] & PTE_V); i++)
+            {
+            }
+            if (i == NPDEENTRY)
+            {
+                free_page(pde2page(pde1));
+                pgdir[PDX1(d1start)] = 0;
+            }
+        }
+        d1start += PDSIZE;
+        d0start = d1start;
+    } while (d1start != 0 && d1start < end);
+}
+
+// lab5 function3 YOUR CODE: copy_range
+
 // invalidate a TLB entry, but only if the page tables being
 // edited are the ones currently in use by the processor.
 void tlb_invalidate(pde_t *pgdir, uintptr_t la)
@@ -474,6 +559,31 @@ void tlb_invalidate(pde_t *pgdir, uintptr_t la)
     // flush_tlb();
     // The flush_tlb flush the entire TLB, is there any better way?
     asm volatile("sfence.vma %0" : : "r"(la));
+}
+
+// pgdir_alloc_page - call alloc_page & page_insert functions to
+//                  - allocate a page size memory & setup an addr map
+//                  - pa<->la with linear address la and the PDT pgdir
+struct Page *pgdir_alloc_page(pde_t *pgdir, uintptr_t la, uint32_t perm)
+{
+    struct Page *page = alloc_page();
+    if (page != NULL)
+    {
+        if (page_insert(pgdir, page, la, perm) != 0)
+        {
+            free_page(page);
+            return NULL;
+        }
+        // swap_map_swappable(check_mm_struct, la, page, 0);
+        page->pra_vaddr = la;
+        assert(page_ref(page) == 1);
+        // cprintf("get No. %d  page: pra_vaddr %x, pra_link.prev %x,
+        // pra_link_next %x in pgdir_alloc_page\n", (page-pages),
+        // page->pra_vaddr,page->pra_page_link.prev,
+        // page->pra_page_link.next);
+    }
+
+    return page;
 }
 
 static void check_alloc_page(void)

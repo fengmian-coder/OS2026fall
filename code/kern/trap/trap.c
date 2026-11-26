@@ -128,6 +128,7 @@ void interrupt_handler(struct trapframe *tf) {
 /* lab3 function2: exception_handler
  * 异常处理
  */
+// lab5 function1 YOUR CODE: handle user ecalls and user exceptions.
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
 
@@ -186,7 +187,7 @@ static inline void trap_dispatch(struct trapframe *tf) {
  * trap - handles or dispatches an exception/interrupt. if and when trap()
  * returns,
  * the code in kern/trap/trapentry.S restores the old CPU state saved in the
- * trapframe and then uses the iret instruction to return from the exception.
+ * trapframe and then uses the sret instruction to return from the exception.
  * */
 void trap(struct trapframe *tf) {
     // dispatch based on what type of trap occurred
