@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <riscv.h>
+#include <kmonitor.h>
 
 /* ------------- process/thread mechanism design&implementation -------------
 (an simplified Linux process/thread mechanism )
@@ -87,7 +88,14 @@ char *
 set_proc_name(struct proc_struct *proc, const char *name)
 {
     memset(proc->name, 0, sizeof(proc->name));
-    return memcpy(proc->name, name, PROC_NAME_LEN);
+
+    size_t len = 0;
+    while (len < PROC_NAME_LEN && name[len] != '\0') {
+        len++;
+    }
+
+    memcpy(proc->name, name, len);
+    return proc->name;
 }
 
 // get_proc_name - get the name of proc
@@ -245,9 +253,65 @@ put_kstack(struct proc_struct *proc)
 //   1. call exit_mmap & put_pgdir & mm_destroy to free the almost all memory space of process
 //   2. set process' state as PROC_ZOMBIE, then call wakeup_proc(parent) to ask parent reclaim itself.
 //   3. call scheduler to switch to other process
+static void release_current_mm(void);
+
+// lab5 function4 2412074
 int do_exit(int error_code)
 {
-    panic("process exit!!.\n");
+    if (current == idleproc || current == initproc) {
+        panic("idleproc or initproc cannot exit.\n");
+    }
+
+    // Release the user address space before becoming a zombie.
+    release_current_mm();
+
+    bool intr_flag;
+    local_intr_save(intr_flag);
+
+    current->state = PROC_ZOMBIE;
+    current->exit_code = error_code;
+    current->wait_state = 0;
+
+    struct proc_struct *parent = current->parent;
+
+    // Wake up the parent if it is waiting for a child.
+    if (parent != NULL &&
+        parent->state == PROC_SLEEPING &&
+        parent->wait_state == WT_CHILD) {
+        wakeup_proc(parent);
+    }
+
+    // Reparent all remaining children to initproc.
+    while (current->cptr != NULL) {
+        struct proc_struct *child = current->cptr;
+        current->cptr = child->optr;
+
+        if (current->cptr != NULL) {
+            current->cptr->yptr = NULL;
+        }
+
+        child->parent = initproc;
+        child->yptr = NULL;
+        child->optr = initproc->cptr;
+
+        if (initproc->cptr != NULL) {
+            initproc->cptr->yptr = child;
+        }
+
+        initproc->cptr = child;
+
+        if (child->state == PROC_ZOMBIE &&
+            initproc->state == PROC_SLEEPING &&
+            initproc->wait_state == WT_CHILD) {
+            wakeup_proc(initproc);
+        }
+    }
+
+    local_intr_restore(intr_flag);
+
+    // A zombie process must never execute again.
+    schedule();
+    panic("do_exit returned unexpectedly.\n");
 }
 
 // init_main - the second kernel thread used to create user_main kernel threads
@@ -271,16 +335,76 @@ int do_exit(int error_code)
 
 #define KERNEL_EXECVE2(x, xstart, xsize) __KERNEL_EXECVE2(x, xstart, xsize)
 
-// lab5 function2 YOUR CODE: init_main, user_main, kernel_execve, do_execve, load_icode, do_wait.
-// lab5 function4 YOUR CODE: do_exit, do_yield, do_kill.
+// lab5 function2 2412074: init_main, user_main, kernel_execve, do_execve, load_icode, do_wait.
+// lab5 function4 2412074: do_exit, do_yield, do_kill.
 
+static int kernel_execve(const char *name,
+                         unsigned char *binary, size_t size);
+
+// lab5 function2 2412074
+// Select the user ELF embedded in the kernel image.
+static int
+user_main(void *arg)
+{
+    (void)arg;
+
+#ifdef TEST
+    return KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
+#else
+    return KERNEL_EXECVE(hello);
+#endif
+}
+
+// lab5 function2 2412074
+// Start user processes and reclaim all terminated children.
 static int
 init_main(void *arg)
 {
-    cprintf("this initproc, pid = %d, name = \"%s\"\n", current->pid, get_proc_name(current));
-    cprintf("To U: \"%s\".\n", (const char *)arg);
-    cprintf("To U: \"en.., Bye, Bye. :)\"\n");
-    return 0;
+    (void)arg;
+
+    size_t free_pages_before = nr_free_pages();
+
+    int pid = kernel_thread(user_main, NULL, 0);
+
+    if (pid <= 0) {
+        panic("cannot create user_main.\n");
+    }
+
+    // Reclaim both the original user process and adopted orphans.
+    while (do_wait(0, NULL) == 0) {
+        schedule();
+    }
+
+    cprintf("all user-mode processes have quit.\n");
+
+    assert(initproc->cptr == NULL);
+    assert(nr_process == 2);
+
+    size_t free_pages_after = nr_free_pages();
+
+    // Check whether all allocated physical pages are reclaimed.
+    if (free_pages_before == free_pages_after) {
+        cprintf("init check memory pass.\n");
+    } else {
+        cprintf("init memory check mismatch: pages %lu -> %lu\n",
+                free_pages_before, free_pages_after);
+    }
+
+#ifdef DEBUG_GRADE
+    // The grading tool observes the kernel monitor entry.
+    kmonitor(NULL);
+#endif
+
+    // initproc must not exit.
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    current->state = PROC_SLEEPING;
+    current->wait_state = 0;
+    local_intr_restore(intr_flag);
+
+    while (1) {
+        schedule();
+    }
 }
 
 //LAB4 function2 2412074
@@ -304,8 +428,16 @@ alloc_proc(void)
     proc->parent = NULL;
     proc->mm = NULL;
     proc->tf = NULL;
-    proc->pgdir = 0;
+    proc->pgdir = boot_pgdir_pa;
     proc->flags = 0;
+
+    // lab5 function2 2412074
+    // Initialize process exit status and family links.
+    proc->exit_code = 0;
+    proc->wait_state = 0;
+    proc->cptr = NULL;
+    proc->yptr = NULL;
+    proc->optr = NULL;
 
     list_init(&(proc->list_link));
     list_init(&(proc->hash_link));
@@ -399,18 +531,468 @@ put_pgdir(struct mm_struct *mm)
     free_page(kva2page(mm->pgdir));
 }
 
-// lab5 function3 YOUR CODE: extend copy_mm and do_fork for user processes.
-// Set up the address space for a kernel thread.
+// lab5 function4 2412074
+// Detach the current address space and release its last reference.
+static void
+release_current_mm(void)
+{
+    struct mm_struct *mm = current->mm;
+
+    if (mm == NULL) {
+        return;
+    }
+
+    // Switch away from the old page table before freeing it.
+    current->pgdir = boot_pgdir_pa;
+    write_csr(satp, 0x8000000000000000UL |
+                    (boot_pgdir_pa >> RISCV_PGSHIFT));
+    asm volatile("sfence.vma" ::: "memory");
+
+    current->mm = NULL;
+
+    if (mm_count_dec(mm) == 0) {
+        exit_mmap(mm);
+        put_pgdir(mm);
+        mm_destroy(mm);
+    }
+}
+
+
+// lab5 function2 2412074
+// Load an ELF image into a newly created user address space.
+static int
+load_icode(unsigned char *binary, size_t size)
+{
+    assert(current->mm == NULL);
+    assert(current->tf != NULL);
+
+    int ret = -E_INVAL_ELF;
+
+    // Check ELF header and program-header table boundaries.
+    if (binary == NULL || size < sizeof(struct elfhdr)) {
+        return ret;
+    }
+
+    struct elfhdr *elf = (struct elfhdr *)binary;
+
+    if (elf->e_magic != ELF_MAGIC ||
+        elf->e_phentsize != sizeof(struct proghdr) ||
+        elf->e_phoff > size ||
+        elf->e_phnum == 0 ||
+        elf->e_phnum >
+            (size - elf->e_phoff) / sizeof(struct proghdr)) {
+        return ret;
+    }
+
+    struct mm_struct *mm = mm_create();
+
+    if (mm == NULL) {
+        return -E_NO_MEM;
+    }
+
+    if ((ret = setup_pgdir(mm)) != 0) {
+        goto bad_mm;
+    }
+
+    struct proghdr *ph = (struct proghdr *)
+        (binary + elf->e_phoff);
+
+    // Load every PT_LOAD segment.
+    for (size_t i = 0; i < elf->e_phnum; i++, ph++) {
+        if (ph->p_type != ELF_PT_LOAD) {
+            continue;
+        }
+
+        ret = -E_INVAL_ELF;
+
+        if (ph->p_filesz > ph->p_memsz ||
+            ph->p_offset > size ||
+            ph->p_filesz > size - ph->p_offset) {
+            goto bad_mmap;
+        }
+
+        if (ph->p_memsz == 0) {
+            continue;
+        }
+
+        uintptr_t start = ph->p_va;
+        uintptr_t stack_bottom = USTACKTOP - USTACKSIZE;
+
+        // Reject overflow and overlap with the reserved user stack.
+        if (start < USERBASE ||
+            start >= stack_bottom ||
+            ph->p_memsz > stack_bottom - start) {
+            goto bad_mmap;
+        }
+
+        uintptr_t end = start + ph->p_memsz;
+        uintptr_t file_end = start + ph->p_filesz;
+
+        uint32_t vm_flags = 0;
+        uint32_t perm = PTE_U | PTE_A;
+
+        if (ph->p_flags & ELF_PF_R) {
+            vm_flags |= VM_READ;
+            perm |= PTE_R;
+        }
+
+        if (ph->p_flags & ELF_PF_W) {
+            // RISC-V does not permit writable, unreadable leaf PTEs.
+            vm_flags |= VM_READ | VM_WRITE;
+            perm |= PTE_R | PTE_W | PTE_D;
+        }
+
+        if (ph->p_flags & ELF_PF_X) {
+            vm_flags |= VM_EXEC;
+            perm |= PTE_X;
+        }
+
+        if (vm_flags == 0) {
+            goto bad_mmap;
+        }
+
+        ret = mm_map(mm, start, ph->p_memsz, vm_flags, NULL);
+
+        if (ret != 0) {
+            goto bad_mmap;
+        }
+
+        // Allocate each page and initialize it before copying file data.
+        for (uintptr_t va = ROUNDDOWN(start, PGSIZE);
+             va < ROUNDUP(end, PGSIZE);
+             va += PGSIZE) {
+
+            struct Page *page =
+                pgdir_alloc_page(mm->pgdir, va, perm);
+
+            if (page == NULL) {
+                ret = -E_NO_MEM;
+                goto bad_mmap;
+            }
+
+            unsigned char *dst = page2kva(page);
+
+            // Zero the page, including BSS and unused bytes.
+            memset(dst, 0, PGSIZE);
+
+            uintptr_t copy_start = va > start ? va : start;
+            uintptr_t page_end = va + PGSIZE;
+            uintptr_t copy_end =
+                page_end < file_end ? page_end : file_end;
+
+            if (copy_start < copy_end) {
+                memcpy(dst + (copy_start - va),
+                       binary + ph->p_offset +
+                           (copy_start - start),
+                       copy_end - copy_start);
+            }
+        }
+    }
+
+    // The entry point must be inside an executable user mapping.
+    ret = -E_INVAL_ELF;
+
+    if (!USER_ACCESS(elf->e_entry, elf->e_entry + 1)) {
+        goto bad_mmap;
+    }
+
+    pte_t *entry_pte = get_pte(mm->pgdir, elf->e_entry, 0);
+
+    if (entry_pte == NULL ||
+        (*entry_pte & (PTE_V | PTE_U | PTE_X)) !=
+            (PTE_V | PTE_U | PTE_X)) {
+        goto bad_mmap;
+    }
+
+    // Create the user stack VMA.
+    ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE,
+                 VM_READ | VM_WRITE | VM_STACK, NULL);
+
+    if (ret != 0) {
+        goto bad_mmap;
+    }
+
+    // Allocate the stack eagerly, leaving the lowest page as a guard.
+    for (uintptr_t va = USTACKTOP - USTACKSIZE + PGSIZE;
+         va < USTACKTOP; va += PGSIZE) {
+
+        struct Page *page = pgdir_alloc_page(
+            mm->pgdir, va,
+            PTE_U | PTE_R | PTE_W | PTE_A | PTE_D);
+
+        if (page == NULL) {
+            ret = -E_NO_MEM;
+            goto bad_mmap;
+        }
+
+        memset(page2kva(page), 0, PGSIZE);
+    }
+
+    // Install the new address space.
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->pgdir = PADDR(mm->pgdir);
+
+    write_csr(satp, 0x8000000000000000UL |
+                    (current->pgdir >> RISCV_PGSHIFT));
+
+    asm volatile("sfence.vma" ::: "memory");
+    // FENCE.I: synchronize instruction fetch after loading ELF code.
+    // Use its encoding because the current assembler target omits Zifencei.
+    asm volatile(".word 0x0000100f" ::: "memory");
+
+    // Prepare the initial U-mode context.
+    struct trapframe *tf = current->tf;
+
+    uintptr_t status = read_csr(sstatus);
+
+    memset(tf, 0, sizeof(*tf));
+
+    tf->gpr.sp = USTACKTOP;
+    tf->epc = elf->e_entry;
+
+    // sret must return to U-mode with interrupts enabled.
+    tf->status = (status & ~(SSTATUS_SPP | SSTATUS_SIE))
+                 | SSTATUS_SPIE;
+
+    return 0;
+
+bad_mmap:
+    exit_mmap(mm);
+    put_pgdir(mm);
+
+bad_mm:
+    mm_destroy(mm);
+    return ret;
+}
+
+
+// Copy a mapped user buffer through kernel page aliases.
+// This avoids directly dereferencing an untrusted user pointer.
+static bool
+exec_copy_user(struct mm_struct *mm, void *dst,
+               const void *src, size_t len)
+{
+    uintptr_t addr = (uintptr_t)src;
+
+    if (len == 0) {
+        return 1;
+    }
+
+    if (!user_mem_check(mm, addr, len, 0)) {
+        return 0;
+    }
+
+    unsigned char *out = dst;
+
+    while (len != 0) {
+        pte_t *ptep = get_pte(mm->pgdir, addr, 0);
+        uint32_t need = PTE_V | PTE_U | PTE_R;
+
+        if (ptep == NULL || (*ptep & need) != need) {
+            return 0;
+        }
+
+        size_t offset = addr % PGSIZE;
+        size_t n = PGSIZE - offset;
+
+        if (n > len) {
+            n = len;
+        }
+
+        unsigned char *page =
+            page2kva(pte2page(*ptep));
+
+        memcpy(out, page + offset, n);
+
+        out += n;
+        addr += n;
+        len -= n;
+    }
+
+    return 1;
+}
+
+
+// lab5 function2 2412074
+// Replace the current process image with a new ELF program.
+int
+do_execve(const char *name, size_t len,
+          unsigned char *binary, size_t size)
+{
+    if (name == NULL || binary == NULL ||
+        size < sizeof(struct elfhdr) ||
+        current->tf == NULL) {
+        return -E_INVAL;
+    }
+
+    struct mm_struct *mm = current->mm;
+    char local_name[PROC_NAME_LEN + 1];
+
+    memset(local_name, 0, sizeof(local_name));
+
+    if (len > PROC_NAME_LEN) {
+        len = PROC_NAME_LEN;
+    }
+
+    struct Page *snapshot = NULL;
+    size_t snapshot_pages = 0;
+    unsigned char *image = binary;
+
+    if (mm != NULL) {
+        // Save the name and ELF data before destroying the old mm.
+        if (!exec_copy_user(mm, local_name, name, len) ||
+            !user_mem_check(mm, (uintptr_t)binary, size, 0)) {
+            return -E_INVAL;
+        }
+
+        snapshot_pages = ROUNDUP(size, PGSIZE) / PGSIZE;
+        snapshot = alloc_pages(snapshot_pages);
+
+        if (snapshot == NULL) {
+            return -E_NO_MEM;
+        }
+
+        image = page2kva(snapshot);
+
+        if (!exec_copy_user(mm, image, binary, size)) {
+            free_pages(snapshot, snapshot_pages);
+            return -E_INVAL;
+        }
+    } else {
+        // The first user ELF is embedded in the kernel image.
+        if ((len != 0 &&
+             !user_mem_check(NULL, (uintptr_t)name, len, 0)) ||
+            !user_mem_check(NULL, (uintptr_t)binary, size, 0)) {
+            return -E_INVAL;
+        }
+
+        memcpy(local_name, name, len);
+    }
+
+    release_current_mm();
+
+    int ret = load_icode(image, size);
+
+    if (snapshot != NULL) {
+        free_pages(snapshot, snapshot_pages);
+    }
+
+    if (ret != 0) {
+        // The old image is already gone, so it cannot be resumed.
+        do_exit(ret);
+        return ret;
+    }
+
+    set_proc_name(current, local_name);
+
+    return 0;
+}
+
+
+// lab5 function2 2412074
+// Enter the common trap-return path for the first user program.
+static int
+kernel_execve(const char *name,
+              unsigned char *binary, size_t size)
+{
+    struct trapframe tf;
+    struct trapframe *oldtf = current->tf;
+
+    memset(&tf, 0, sizeof(tf));
+    current->tf = &tf;
+
+    int ret = do_execve(name, strlen(name), binary, size);
+
+    if (ret != 0) {
+        current->tf = oldtf;
+        return ret;
+    }
+
+    // Place the final trapframe at the canonical kernel-stack top.
+    struct trapframe *top = (struct trapframe *)
+        (current->kstack + KSTACKSIZE - sizeof(tf));
+
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    (void)intr_flag;
+
+    current->tf = top;
+
+    // Copy backwards and jump without returning through the old
+    // C stack frames, which may overlap the destination trapframe.
+    asm volatile(
+        "mv t0, %0\n"
+        "mv t1, %1\n"
+        "mv t2, %2\n"
+        "add t0, t0, t2\n"
+        "add t1, t1, t2\n"
+        "1:\n"
+        "addi t0, t0, -8\n"
+        "addi t1, t1, -8\n"
+        "ld t3, 0(t1)\n"
+        "sd t3, 0(t0)\n"
+        "addi t2, t2, -8\n"
+        "bnez t2, 1b\n"
+        "mv sp, %0\n"
+        "j __trapret\n"
+        :
+        : "r"(top), "r"(&tf), "r"(sizeof(tf))
+        : "t0", "t1", "t2", "t3", "memory"
+    );
+
+    __builtin_unreachable();
+}
+
+
+// lab5 function3 2412074: extend copy_mm and do_fork for user processes.
+// Copy or share the parent's address space.
 static int
 copy_mm(uint32_t clone_flags, struct proc_struct *proc)
 {
-    // User address-space copying is not required in Lab4.
-    assert(current->mm == NULL);
+    struct mm_struct *mm, *oldmm = current->mm;
+    int ret = -E_NO_MEM;
 
-    proc->mm = NULL;
-    proc->pgdir = boot_pgdir_pa;
+    // Kernel threads do not have a user address space.
+    if (oldmm == NULL) {
+        return 0;
+    }
 
+    // Threads with CLONE_VM share the same address space.
+    if (clone_flags & CLONE_VM) {
+        mm = oldmm;
+        goto good_mm;
+    }
+
+    // Ordinary fork creates an independent address space.
+    if ((mm = mm_create()) == NULL) {
+        return ret;
+    }
+
+    if ((ret = setup_pgdir(mm)) != 0) {
+        goto bad_mm;
+    }
+
+    // The caller must hold the source mm lock.
+    lock_mm(oldmm);
+    ret = dup_mmap(mm, oldmm);
+    unlock_mm(oldmm);
+
+    if (ret != 0) {
+        // dup_mmap already rolls back copied mappings and VMAs.
+        put_pgdir(mm);
+        goto bad_mm;
+    }
+
+good_mm:
+    mm_count_inc(mm);
+    proc->mm = mm;
+    proc->pgdir = PADDR(mm->pgdir);
     return 0;
+
+bad_mm:
+    mm_destroy(mm);
+    return ret;
 }
 
 
@@ -428,9 +1010,14 @@ copy_thread(struct proc_struct *proc, uintptr_t esp,
     // A child process initially returns zero from fork.
     proc->tf->gpr.a0 = 0;
 
-    // Kernel threads need a valid stack after trapframe restoration.
-    proc->tf->gpr.sp = (esp != 0) ? esp :
-        (proc->kstack + KSTACKSIZE);
+    // lab5 function3 2412074
+    // Select the initial stack according to the privilege level.
+    if (tf->status & SSTATUS_SPP) {
+        proc->tf->gpr.sp = (esp != 0) ? esp :
+            (proc->kstack + KSTACKSIZE);
+    } else {
+        proc->tf->gpr.sp = (esp != 0) ? esp : tf->gpr.sp;
+    }
 
     // The first context switch enters forkret.
     proc->context.ra = (uintptr_t)forkret;
@@ -464,7 +1051,7 @@ do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     }
 
     // Set up the memory management information.
-    if (copy_mm(clone_flags, proc) != 0) {
+    if ((ret = copy_mm(clone_flags, proc)) != 0) {
         goto bad_fork_cleanup_kstack;
     }
 
@@ -477,8 +1064,10 @@ do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
 
     proc->pid = get_pid();
     hash_proc(proc);
-    list_add(&proc_list, &(proc->list_link));
-    nr_process++;
+
+    // lab5 function3 2412074
+    // Register the process and establish family links.
+    set_links(proc);
 
     // Make the new thread runnable before leaving the critical section.
     wakeup_proc(proc);
@@ -494,6 +1083,203 @@ bad_fork_cleanup_proc:
     kfree(proc);
     return ret;
 }
+
+
+// lab5 function2 2412074
+// Check that the exit-code destination is writable and mapped.
+static bool
+wait_store_valid(struct mm_struct *mm, int *store)
+{
+    if (store == NULL) {
+        return 1;
+    }
+
+    uintptr_t start = (uintptr_t)store;
+
+    if (!user_mem_check(mm, start, sizeof(int), 1)) {
+        return 0;
+    }
+
+    if (mm != NULL) {
+        // Check every page touched by the exit-code destination.
+        uintptr_t end = start + sizeof(int);
+        uintptr_t addr = ROUNDDOWN(start, PGSIZE);
+
+        for (; addr < end; addr += PGSIZE) {
+            pte_t *ptep = get_pte(mm->pgdir, addr, 0);
+            uint32_t need = PTE_V | PTE_U | PTE_W;
+
+            if (ptep == NULL || (*ptep & need) != need) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
+// Wait for a specific child, or any child when pid is zero.
+int
+do_wait(int pid, int *code_store)
+{
+    if (pid < 0) {
+        return -E_BAD_PROC;
+    }
+
+    struct mm_struct *mm = current->mm;
+
+    if (!wait_store_valid(mm, code_store)) {
+        return -E_INVAL;
+    }
+
+    while (1) {
+        struct proc_struct *proc = NULL;
+        struct proc_struct *child;
+        bool has_child = 0;
+        bool intr_flag;
+
+        if (current->flags & PF_EXITING) {
+            do_exit(-E_KILLED);
+        }
+
+        local_intr_save(intr_flag);
+
+        if (pid != 0) {
+            child = find_proc(pid);
+
+            if (child != NULL && child->parent == current) {
+                has_child = 1;
+
+                if (child->state == PROC_ZOMBIE) {
+                    proc = child;
+                }
+            }
+        } else {
+            // Search all children through the sibling links.
+            for (child = current->cptr;
+                 child != NULL;
+                 child = child->optr) {
+
+                has_child = 1;
+
+                if (child->state == PROC_ZOMBIE) {
+                    proc = child;
+                    break;
+                }
+            }
+        }
+
+        if (proc != NULL) {
+            assert(proc != idleproc && proc != initproc);
+            assert(proc->mm == NULL);
+
+            if (code_store != NULL) {
+                if (!wait_store_valid(mm, code_store)) {
+                    local_intr_restore(intr_flag);
+                    return -E_INVAL;
+                }
+
+                int code = proc->exit_code;
+
+                if (mm != NULL) {
+                    // Permit controlled S-mode access to user memory.
+                    uintptr_t status = set_csr(sstatus, SSTATUS_SUM);
+                    asm volatile("" ::: "memory");
+
+                    bool ok = copy_to_user(mm, code_store,
+                                           &code, sizeof(code));
+
+                    asm volatile("" ::: "memory");
+                    if (!(status & SSTATUS_SUM)) {
+                        clear_csr(sstatus, SSTATUS_SUM);
+                    }
+
+                    if (!ok) {
+                        local_intr_restore(intr_flag);
+                        return -E_INVAL;
+                    }
+                } else {
+                    *code_store = code;
+                }
+            }
+
+            // The parent performs final reclamation.
+            unhash_proc(proc);
+            remove_links(proc);
+            local_intr_restore(intr_flag);
+
+            put_kstack(proc);
+            kfree(proc);
+
+            return 0;
+        }
+
+        if (!has_child) {
+            local_intr_restore(intr_flag);
+            return -E_BAD_PROC;
+        }
+
+        // A matching child exists but has not exited yet.
+        current->state = PROC_SLEEPING;
+        current->wait_state = WT_CHILD;
+
+        local_intr_restore(intr_flag);
+        schedule();
+
+        current->wait_state = 0;
+
+        if (current->flags & PF_EXITING) {
+            do_exit(-E_KILLED);
+        }
+    }
+}
+
+// lab5 function4 2412074
+int
+do_yield(void)
+{
+    current->need_resched = 1;
+    return 0;
+}
+
+// lab5 function4 2412074
+int
+do_kill(int pid)
+{
+    if (pid <= 0 || pid >= MAX_PID) {
+        return -E_INVAL;
+    }
+
+    bool intr_flag;
+    int ret = -E_BAD_PROC;
+
+    local_intr_save(intr_flag);
+
+    struct proc_struct *proc = find_proc(pid);
+
+    if (proc != NULL &&
+        proc != idleproc &&
+        proc != initproc &&
+        proc->state != PROC_ZOMBIE) {
+
+        if (proc->flags & PF_EXITING) {
+            ret = -E_KILLED;
+        } else {
+            proc->flags |= PF_EXITING;
+
+            if (proc->state == PROC_SLEEPING &&
+                (proc->wait_state & WT_INTERRUPTED)) {
+                wakeup_proc(proc);
+            }
+
+            ret = 0;
+        }
+    }
+
+    local_intr_restore(intr_flag);
+    return ret;
+}
+
 
 // LAB4 function3 2411785
 // Member C: 李文慧
