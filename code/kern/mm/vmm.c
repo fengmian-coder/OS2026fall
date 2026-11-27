@@ -223,7 +223,50 @@ out:
     return ret;
 }
 
-// lab5 function3 YOUR CODE: dup_mmap
+// lab5 function3 2414029: caller holds the source mm lock.
+int dup_mmap(struct mm_struct *to, struct mm_struct *from)
+{
+    assert(to != from && to->pgdir != NULL && from->pgdir != NULL);
+    assert(to->pgdir != from->pgdir);
+    assert(mm_count(to) == 0 && list_empty(&to->mmap_list));
+
+    int ret;
+    list_entry_t *list = &from->mmap_list;
+    // Insert in reverse order so each VMA is inserted at the list head.
+    for (list_entry_t *le = list_prev(list); le != list; le = list_prev(le))
+    {
+        struct vma_struct *source = le2vma(le, list_link);
+        struct vma_struct *vma = vma_create(source->vm_start, source->vm_end,
+                                           source->vm_flags);
+        if (vma == NULL)
+        {
+            ret = -E_NO_MEM;
+            goto failed;
+        }
+
+        insert_vma_struct(to, vma);
+        ret = copy_range(to->pgdir, from->pgdir, vma->vm_start, vma->vm_end, 0);
+        if (ret != 0)
+        {
+            goto failed;
+        }
+    }
+    return 0;
+
+failed:
+    // Exit mappings before freeing the VMAs that describe their ranges.
+    exit_mmap(to);
+    list = &to->mmap_list;
+    while (!list_empty(list))
+    {
+        list_entry_t *le = list_next(list);
+        list_del(le);
+        kfree(le2vma(le, list_link));
+    }
+    to->map_count = 0;
+    to->mmap_cache = NULL;
+    return ret;
+}
 
 void exit_mmap(struct mm_struct *mm)
 {

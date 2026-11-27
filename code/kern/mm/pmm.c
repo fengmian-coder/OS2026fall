@@ -550,7 +550,64 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
     } while (d1start != 0 && d1start < end);
 }
 
-// lab5 function3 YOUR CODE: copy_range
+// lab5 function3 2414029: copy mappings into an unmapped destination range.
+int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool share)
+{
+    assert(to != from);
+    assert(start % PGSIZE == 0 && end % PGSIZE == 0);
+    assert(USER_ACCESS(start, end));
+
+    uintptr_t addr = start;
+    int ret;
+    while (addr < end)
+    {
+        pte_t *ptep = get_pte(from, addr, 0);
+        if (ptep == NULL)
+        {
+            // There is no leaf page table for this span.
+            addr = ROUNDDOWN(addr, PTSIZE) + PTSIZE;
+            continue;
+        }
+        if (*ptep & PTE_V)
+        {
+            struct Page *source = pte2page(*ptep);
+            struct Page *page = source;
+            uint32_t perm = *ptep & PTE_USER;
+
+            if (!share)
+            {
+                page = alloc_page();
+                if (page == NULL)
+                {
+                    ret = -E_NO_MEM;
+                    goto failed;
+                }
+                memcpy(page2kva(page), page2kva(source), PGSIZE);
+            }
+            // Insertion takes one reference. A failed insertion takes none.
+            ret = page_insert(to, page, addr, perm);
+            if (ret != 0)
+            {
+                if (!share)
+                {
+                    free_page(page);
+                }
+                goto failed;
+            }
+        }
+        addr += PGSIZE;
+    }
+    return 0;
+
+failed:
+    // Only mappings installed earlier in this call need to be undone.
+    if (addr > start)
+    {
+        unmap_range(to, start, addr);
+        exit_range(to, start, addr);
+    }
+    return ret;
+}
 
 // invalidate a TLB entry, but only if the page tables being
 // edited are the ones currently in use by the processor.
